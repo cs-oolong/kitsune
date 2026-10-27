@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import signal
 import sys
+import tempfile
 import time
+from pathlib import Path
 from typing import Sequence
 
 from . import __version__
 from . import config
 from .client import ChatError, chat_completion, save_api_key, tunnel
 from .cluster import Inventory, fetch_inventory
-from .conversation import ChatStore
+from .ledger import latest_chat, read_chats
 from .estimate import OVERHEAD_GIB, dtype_for, fetch_model_info, kv_gib, suggest, weight_gib
 from .job import render_job_script
+from chat_with_ledger.errors import ChatError as LedgerChatError
+from chat_with_ledger.ledger import history as ledger_history, load_chat
+from chat_with_ledger.turn import run_turn
 from .remote import (
     RemoteError,
     cancel,
@@ -28,6 +35,7 @@ from .remote import (
     validate_model,
 )
 
+PROVIDER = "kitsune"
 STATUS_LABEL = {
     "loading": "carregando o modelo",
     "ready": "pronto",
@@ -215,14 +223,6 @@ def cmd_chat(args: argparse.Namespace) -> int:
     if args.chat and starts_new:
         raise ValueError("--chat não combina com --new ou --system")
 
-    store = ChatStore()
-    if args.chat:
-        conversation = store.load(args.chat)
-    elif starts_new:
-        conversation = store.new(system=args.system)
-    else:
-        conversation = store.active() or store.new()
-
     running = [job for job in list_jobs() if job.state == "RUNNING"]
     if not running:
         raise RemoteError("nenhum servidor no ar. Use `kitsune start` e acompanhe com `kitsune status`.")
@@ -231,18 +231,48 @@ def cmd_chat(args: argparse.Namespace) -> int:
         label = STATUS_LABEL.get(state.get("STATUS", ""), "iniciando")
         raise RemoteError(f"o servidor ainda não está pronto ({label}). Veja `kitsune status`.")
 
-    with tunnel(state["NODE"], int(state["PORT"])) as local_port:
-        reply = chat_completion(
-            local_port,
-            state["TOKEN"],
-            state["MODEL"],
-            conversation.request_messages(text),
-        )
-    conversation.record(text, reply)
-    store.save(conversation)
-    store.set_active(conversation.id)
-    print(reply)
-    print(f"\n[chat {conversation.id}]", file=sys.stderr)
+    ledger_dir = Path(args.ledger_dir)
+    model_id = state["MODEL"]
+    if args.chat:
+        chat_id = args.chat
+    elif starts_new:
+        chat_id = None
+    else:
+        chat_id = latest_chat(ledger_dir, provider=PROVIDER, model_id=model_id)
+
+    system_file = Path(args.system_prompt_file)
+    temp_path = None
+    if args.system is not None:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", encoding="utf-8", delete=False) as handle:
+            handle.write(args.system)
+            temp_path = Path(handle.name)
+        system_file = temp_path
+    os.environ["KITSUNE_API_KEY"] = state["TOKEN"]
+    try:
+        with tunnel(state["NODE"], int(state["PORT"])) as local_port:
+            result = run_turn(
+                model_id,
+                text,
+                chat_id=chat_id,
+                ledger_dir=ledger_dir,
+                system_prompt_file=system_file,
+                provider_name=PROVIDER,
+                base_url=f"http://127.0.0.1:{local_port}/v1",
+            )
+    except LedgerChatError as error:
+        print(json.dumps({"error": getattr(error, "code", "error"), "detail": str(error)}, ensure_ascii=False), file=sys.stderr)
+        return 2
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+    last = result["history"][-1]
+    if "error" in last:
+        print(f"erro: {last['error']}", file=sys.stderr)
+        print(f"[chat {result['chat_id']}]", file=sys.stderr)
+        return 1
+    print(last["content"])
+    print(f"\n[chat {result['chat_id']}]", file=sys.stderr)
     return 0
 
 
@@ -281,38 +311,35 @@ def cmd_tunnel(args: argparse.Namespace) -> int:
 
 
 def cmd_chats(args: argparse.Namespace) -> int:
-    store = ChatStore()
-    chats = store.list()
+    chats = read_chats(Path(args.ledger_dir))
     if not chats:
         print('Nenhum chat ainda. Use `kitsune chat "..."`.')
         return 0
-    active = store.active_id()
-    print("  ID    CRIADO               TURNOS  PRIMEIRA MENSAGEM")
+    print("ID                              ATUALIZADO                PROVEDOR  MODELO                       TURNOS  PRIMEIRA MENSAGEM")
     for chat in chats:
-        marker = "*" if chat.id == active else " "
-        first = next((m["content"] for m in chat.messages if m["role"] == "user"), "")
+        messages = chat.get("messages", [])
+        turns = sum(1 for m in messages if m.get("role") == "user")
+        first = next((m.get("content", "") for m in messages if m.get("role") == "user"), "")
         preview = " ".join(first.split())[:PREVIEW_CHARS] or "(vazio)"
-        print(f"{marker} {chat.id}  {chat.created}  {chat.turns:>6}  {preview}")
-    print("\n* = chat ativo (o que `kitsune chat` continua)")
+        print(f"{chat['chat_id']:<31} {chat.get('updated_at', ''):<25} {chat.get('provider', ''):<9} {chat.get('model_id', ''):<28} {turns:>6}  {preview}")
     return 0
 
 
 def cmd_history(args: argparse.Namespace) -> int:
-    store = ChatStore()
-    if args.chat_id:
-        conversation = store.load(args.chat_id)
-    else:
-        conversation = store.active()
-        if conversation is None:
-            print('Nenhum chat ativo. Use `kitsune chat "..."` ou `kitsune chats`.')
-            return 0
-    print(f"Chat {conversation.id} (criado em {conversation.created})\n")
-    if conversation.system:
-        print(f"[sistema] {conversation.system}\n")
-    if not conversation.messages:
-        print("(sem mensagens)")
+    ledger_dir = Path(args.ledger_dir)
+    chat_id = args.chat_id or latest_chat(ledger_dir, provider=PROVIDER)
+    if chat_id is None:
+        print('Nenhum chat do kitsune. Use `kitsune chat "..."` ou `kitsune chats`.')
         return 0
-    for message in conversation.messages:
+    chat = load_chat(ledger_dir, chat_id)
+    if chat is None:
+        raise ValueError(f"chat {chat_id} não existe em {ledger_dir}")
+    print(f"Chat {chat_id} ({chat.get('provider')}/{chat.get('model_id')}, criado em {chat.get('created_at')})\n")
+    print(f"[sistema] {chat.get('system_prompt', '')}\n")
+    for message in ledger_history(chat, include_errors=True):
+        if "error" in message:
+            print(f"Modelo: (erro) {message['error']}\n")
+            continue
         who = "Você" if message["role"] == "user" else "Modelo"
         print(f"{who}: {message['content']}\n")
     return 0
@@ -367,22 +394,26 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="mostra se há um servidor no ar")
     status.set_defaults(func=cmd_status)
 
-    chat = sub.add_parser("chat", help="manda uma mensagem ao modelo")
+    chat = sub.add_parser("chat", help="manda uma mensagem ao modelo e grava em ledger/")
     chat.add_argument("message", nargs="+")
-    chat.add_argument("-c", "--chat", metavar="ID", help="continua o chat ID (e o torna o ativo)")
+    chat.add_argument("-c", "--chat", metavar="ID", help="continua o chat ID")
     chat.add_argument("--new", action="store_true", help="começa um chat novo")
-    chat.add_argument("--system", default=None, help="instrução de sistema; começa um chat novo")
+    chat.add_argument("--system", default=None, help="instrução de sistema para um chat novo (dispensa o arquivo)")
+    chat.add_argument("--system-prompt-file", default="system_prompt.txt", help="arquivo do prompt de sistema (padrão: %(default)s)")
+    chat.add_argument("--ledger-dir", default="ledger", help="pasta do ledger (padrão: %(default)s)")
     chat.set_defaults(func=cmd_chat)
 
     tunnel_cmd = sub.add_parser("tunnel", help="abre o túnel até o servidor, para outras ferramentas (ex.: interact)")
     tunnel_cmd.add_argument("--port", type=int, default=config.TUNNEL_PORT, help="porta local (padrão: %(default)s)")
     tunnel_cmd.set_defaults(func=cmd_tunnel)
 
-    chats = sub.add_parser("chats", help="lista os chats guardados")
+    chats = sub.add_parser("chats", help="lista os chats no ledger")
+    chats.add_argument("--ledger-dir", default="ledger", help="pasta do ledger (padrão: %(default)s)")
     chats.set_defaults(func=cmd_chats)
 
-    history = sub.add_parser("history", help="mostra um chat (o ativo, se não passar ID)")
+    history = sub.add_parser("history", help="mostra um chat do ledger (o mais recente do kitsune, se não passar ID)")
     history.add_argument("chat_id", nargs="?", metavar="ID")
+    history.add_argument("--ledger-dir", default="ledger", help="pasta do ledger (padrão: %(default)s)")
     history.set_defaults(func=cmd_history)
 
     stop = sub.add_parser("stop", help="cancela o servidor no ar")

@@ -8,7 +8,9 @@ dynamic = ["version"]
 description = "Mini-OpenRouter: sobe um modelo num nó de GPU do cluster RECOD por tempo limitado e conversa com ele."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "chat-with-ledger @ git+https://github.com/cs-oolong/chat-with-ledger@v0.1.1",
+]
 
 [project.scripts]
 kitsune = "kitsune.cli:main"
@@ -24,3 +26,6 @@ dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
