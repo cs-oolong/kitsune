@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 import time
 from typing import Sequence
@@ -245,8 +246,15 @@ def cmd_chat(args: argparse.Namespace) -> int:
     return 0
 
 
+def _raise_interrupt(*_: object) -> None:
+    raise KeyboardInterrupt()
+
+
 def cmd_tunnel(args: argparse.Namespace) -> int:
     sys.stdout.reconfigure(line_buffering=True)
+    # Processos de fundo de shells não interativos herdam SIGINT ignorado; SIGTERM também fecha o túnel.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, _raise_interrupt)
     running = [job for job in list_jobs() if job.state == "RUNNING"]
     if not running:
         raise RemoteError("nenhum servidor no ar. Use `kitsune start` e acompanhe com `kitsune status`.")
