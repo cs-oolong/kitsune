@@ -24,13 +24,12 @@ kitsune suggest --model Qwen/Qwen2.5-7B-Instruct   # qual partição e quantas G
 kitsune start                 # envia o job ao Slurm (1 hora, 1 GPU na l40s)
 kitsune start --partition rtx8000 --gpus 2 --gpu-util 0.3
 kitsune status                # fila, carregando, pronto
-kitsune chat "oi, tudo bem?"  # continua o chat ativo
-kitsune chat --new "outro assunto"                       # chat novo, vira o ativo
+kitsune chat "oi, tudo bem?"                             # sem -c: chat novo (usa system_prompt.txt)
 kitsune chat --system "Responda em português." "..."     # chat novo com instrução de sistema
-kitsune chat -c a3f9 "voltando ao assunto anterior"      # continua o chat a3f9
-kitsune chats                 # lista os chats (* = ativo)
-kitsune history               # mostra o chat ativo
-kitsune history a3f9          # mostra um chat específico
+kitsune chat -c chat-20261027T194108Z-16b5a5 "continua"  # continua um chat existente (precisa existir)
+kitsune chats                 # lista os chats em ledger-kitsune/
+kitsune history              # mostra o chat kitsune mais recente
+kitsune history <ID>          # mostra um chat específico
 kitsune stop                  # cancela antes da 1 hora
 ```
 
