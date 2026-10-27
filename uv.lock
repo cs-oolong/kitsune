@@ -3,11 +3,6 @@ revision = 5
 requires-python = ">=3.10"
 
 [[package]]
-name = "chat-with-ledger"
-version = "0.1.1"
-source = { git = "https://github.com/cs-oolong/chat-with-ledger?rev=v0.1.1#38a4e576aa8cda957299e90647ec24edfb2ac2e5" }
-
-[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -40,9 +35,6 @@ wheels = [
 [[package]]
 name = "kitsune"
 source = { editable = "." }
-dependencies = [
-    { name = "chat-with-ledger" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -50,7 +42,6 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "chat-with-ledger", git = "https://github.com/cs-oolong/chat-with-ledger?rev=v0.1.1" }]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8" }]

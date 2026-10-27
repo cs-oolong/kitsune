@@ -19,9 +19,9 @@ from .cluster import Inventory, fetch_inventory
 from .ledger import latest_chat, read_chats
 from .estimate import OVERHEAD_GIB, dtype_for, fetch_model_info, kv_gib, suggest, weight_gib
 from .job import render_job_script
-from chat_with_ledger.errors import ChatError as LedgerChatError
-from chat_with_ledger.ledger import history as ledger_history, load_chat
-from chat_with_ledger.turn import run_turn
+from .chatlog.errors import ChatError as LedgerChatError
+from .chatlog.ledger import history as ledger_history, load_chat, validate_chat_id
+from .chatlog.turn import run_turn
 from .remote import (
     RemoteError,
     cancel,
@@ -215,13 +215,25 @@ def _start_command(model: str, partition: str, gpus: int, gpu_util: float, max_l
     )
 
 
+def check_chat_target(ledger_dir: Path, chat_id: str | None, system: str | None) -> None:
+    if chat_id is None:
+        return
+    validate_chat_id(chat_id)
+    if system is not None:
+        raise LedgerChatError("--system só vale para chat novo; não use junto com -c", code="bad_request")
+    if load_chat(ledger_dir, chat_id) is None:
+        raise LedgerChatError(
+            f"chat {chat_id} não existe em {ledger_dir}. Sem -c, o comando cria um chat novo.",
+            code="chat_not_found",
+        )
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     text = " ".join(args.message).strip()
     if not text:
         raise ValueError("escreva uma mensagem")
-    starts_new = args.new or args.system is not None
-    if args.chat and starts_new:
-        raise ValueError("--chat não combina com --new ou --system")
+    ledger_dir = Path(args.ledger_dir)
+    check_chat_target(ledger_dir, args.chat, args.system)
 
     running = [job for job in list_jobs() if job.state == "RUNNING"]
     if not running:
@@ -230,15 +242,6 @@ def cmd_chat(args: argparse.Namespace) -> int:
     if state.get("STATUS") != "ready":
         label = STATUS_LABEL.get(state.get("STATUS", ""), "iniciando")
         raise RemoteError(f"o servidor ainda não está pronto ({label}). Veja `kitsune status`.")
-
-    ledger_dir = Path(args.ledger_dir)
-    model_id = state["MODEL"]
-    if args.chat:
-        chat_id = args.chat
-    elif starts_new:
-        chat_id = None
-    else:
-        chat_id = latest_chat(ledger_dir, provider=PROVIDER, model_id=model_id)
 
     system_file = Path(args.system_prompt_file)
     temp_path = None
@@ -251,9 +254,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
     try:
         with tunnel(state["NODE"], int(state["PORT"])) as local_port:
             result = run_turn(
-                model_id,
+                state["MODEL"],
                 text,
-                chat_id=chat_id,
+                chat_id=args.chat,
                 ledger_dir=ledger_dir,
                 system_prompt_file=system_file,
                 provider_name=PROVIDER,
@@ -396,8 +399,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat = sub.add_parser("chat", help="manda uma mensagem ao modelo e grava em ledger-kitsune/")
     chat.add_argument("message", nargs="+")
-    chat.add_argument("-c", "--chat", metavar="ID", help="continua o chat ID")
-    chat.add_argument("--new", action="store_true", help="começa um chat novo")
+    chat.add_argument("-c", "--chat", metavar="ID", help="continua o chat ID (precisa existir); sem -c, cria um chat novo")
     chat.add_argument("--system", default=None, help="instrução de sistema para um chat novo (dispensa o arquivo)")
     chat.add_argument("--system-prompt-file", default="system_prompt.txt", help="arquivo do prompt de sistema (padrão: %(default)s)")
     chat.add_argument("--ledger-dir", default=config.LEDGER_DIR, help="pasta do ledger (padrão: %(default)s)")
@@ -427,6 +429,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
+    except LedgerChatError as error:
+        print(json.dumps({"error": getattr(error, "code", "error"), "detail": str(error)}, ensure_ascii=False), file=sys.stderr)
+        return 2
     except (RemoteError, ChatError, ValueError) as error:
         print(f"erro: {error}", file=sys.stderr)
         return 1
