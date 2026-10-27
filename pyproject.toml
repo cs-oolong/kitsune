@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kitsune"
+dynamic = ["version"]
+description = "Mini-OpenRouter: sobe um modelo num nó de GPU do cluster RECOD por tempo limitado e conversa com ele."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+kitsune = "kitsune.cli:main"
+
+[tool.hatch.version]
+path = "src/kitsune/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kitsune"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
