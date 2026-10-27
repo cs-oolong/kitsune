@@ -46,3 +46,5 @@ MIN_COMPUTE_CAPABILITY = 7.5
 
 API_KEY_FILE = Path.home() / ".local" / "state" / "kitsune" / "api_key"
 TUNNEL_PORT = 8000
+# Chats do kitsune ficam separados dos chats do OpenRouter (ledger/, do interact).
+LEDGER_DIR = "ledger-kitsune"

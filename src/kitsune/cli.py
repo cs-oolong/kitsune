@@ -394,13 +394,13 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="mostra se há um servidor no ar")
     status.set_defaults(func=cmd_status)
 
-    chat = sub.add_parser("chat", help="manda uma mensagem ao modelo e grava em ledger/")
+    chat = sub.add_parser("chat", help="manda uma mensagem ao modelo e grava em ledger-kitsune/")
     chat.add_argument("message", nargs="+")
     chat.add_argument("-c", "--chat", metavar="ID", help="continua o chat ID")
     chat.add_argument("--new", action="store_true", help="começa um chat novo")
     chat.add_argument("--system", default=None, help="instrução de sistema para um chat novo (dispensa o arquivo)")
     chat.add_argument("--system-prompt-file", default="system_prompt.txt", help="arquivo do prompt de sistema (padrão: %(default)s)")
-    chat.add_argument("--ledger-dir", default="ledger", help="pasta do ledger (padrão: %(default)s)")
+    chat.add_argument("--ledger-dir", default=config.LEDGER_DIR, help="pasta do ledger (padrão: %(default)s)")
     chat.set_defaults(func=cmd_chat)
 
     tunnel_cmd = sub.add_parser("tunnel", help="abre o túnel até o servidor, para outras ferramentas (ex.: interact)")
@@ -408,12 +408,12 @@ def build_parser() -> argparse.ArgumentParser:
     tunnel_cmd.set_defaults(func=cmd_tunnel)
 
     chats = sub.add_parser("chats", help="lista os chats no ledger")
-    chats.add_argument("--ledger-dir", default="ledger", help="pasta do ledger (padrão: %(default)s)")
+    chats.add_argument("--ledger-dir", default=config.LEDGER_DIR, help="pasta do ledger (padrão: %(default)s)")
     chats.set_defaults(func=cmd_chats)
 
     history = sub.add_parser("history", help="mostra um chat do ledger (o mais recente do kitsune, se não passar ID)")
     history.add_argument("chat_id", nargs="?", metavar="ID")
-    history.add_argument("--ledger-dir", default="ledger", help="pasta do ledger (padrão: %(default)s)")
+    history.add_argument("--ledger-dir", default=config.LEDGER_DIR, help="pasta do ledger (padrão: %(default)s)")
     history.set_defaults(func=cmd_history)
 
     stop = sub.add_parser("stop", help="cancela o servidor no ar")
