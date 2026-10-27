@@ -246,6 +246,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
 
 def cmd_tunnel(args: argparse.Namespace) -> int:
+    sys.stdout.reconfigure(line_buffering=True)
     running = [job for job in list_jobs() if job.state == "RUNNING"]
     if not running:
         raise RemoteError("nenhum servidor no ar. Use `kitsune start` e acompanhe com `kitsune status`.")
