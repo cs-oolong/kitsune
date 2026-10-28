@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
 import time
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -61,3 +63,45 @@ def save_api_key(token: str, path: Path) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as handle:
         handle.write(token + "\n")
+
+
+def save_tunnel_info(info: dict, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write(json.dumps(info) + "\n")
+
+
+def read_tunnel_info(path: Path) -> dict | None:
+    try:
+        info = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return info if isinstance(info, dict) else None
+
+
+def clear_tunnel_info(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def probe_shared_tunnel(info: dict, token: str, timeout: float = 1.5) -> str | None:
+    """Base URL do túnel compartilhado, se ele estiver vivo e for do MESMO servidor.
+
+    A validação é uma chamada autenticada a /v1/models: recusa (401) significa
+    túnel de um servidor anterior; conexão recusada, túnel morto.
+    """
+    try:
+        local_port = int(info["local_port"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    base = f"http://127.0.0.1:{local_port}/v1"
+    request = urllib.request.Request(
+        f"{base}/models", headers={"Authorization": f"Bearer {token}"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status == 200:
+                return base
+    except OSError:
+        pass
+    return None

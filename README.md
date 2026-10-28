@@ -67,7 +67,7 @@ O padrão de modelo é `Qwen/Qwen2.5-0.5B-Instruct`, pequeno, para testar o flux
 
 ## Usar a API de outros programas
 
-`kitsune tunnel` abre um túnel até o servidor em `http://127.0.0.1:8000/v1` (use `--port` para outra porta) e fica aberto até Ctrl-C. A chave fica em `~/.local/state/kitsune/api_key`, com permissão 600. Em outro terminal:
+`kitsune tunnel` abre um túnel até o servidor em `http://127.0.0.1:8000/v1` (use `--port` para outra porta) e fica aberto até Ctrl-C. A chave fica em `~/.local/state/kitsune/api_key`, com permissão 600. Enquanto o túnel está aberto, ele se anuncia em `~/.local/state/kitsune/tunnel.json` e **todo `kitsune chat` o reutiliza** — nada de abrir e fechar um túnel SSH a cada turno (a validação é por token, então um túnel de um servidor antigo nunca é usado por engano; sem túnel aberto, o `chat` abre o dele como sempre). Em outro terminal:
 
 ```bash
 export KITSUNE_API_KEY="$(cat ~/.local/state/kitsune/api_key)"
@@ -89,7 +89,7 @@ Para qualquer programa que aceite uma API no formato da OpenAI, use como URL bas
 - `setup` instala o vLLM num venv em `~/kitsune/venv` e baixa o modelo para `~/kitsune/models/`.
 - `start` envia um script de batch pela entrada padrão do `sbatch`. O job escolhe uma porta livre, gera um token novo e sobe `vllm serve` com `--host 0.0.0.0`. Ele grava nó, porta, token e status em `~/kitsune/state/<jobid>.env` (permissão 600). O log do job fica em `~/kitsune/logs/<jobid>.out` e se lê do laptop com `kitsune logs`.
 - Quando não há job no ar, `status` reconstrói o destino do último job (pelo `sacct` e pelo arquivo de estado): se falhou, mostra o código de saída e a causa provável extraída do log; se foi cancelado ou estourou o tempo, diz isso em vez de parecer que nunca existiu.
-- `chat` lê o arquivo de estado, abre um túnel `ssh -L` até o nó e chama `/v1/chat/completions` com o token como `Bearer`.
+- `chat` lê o arquivo de estado e chama `/v1/chat/completions` com o token como `Bearer`. Se houver um `kitsune tunnel` aberto para o mesmo servidor (descoberto em `tunnel.json` e validado por `/v1/models`), usa ele; senão, abre um túnel `ssh -L` só para aquela mensagem.
 - Quando o limite de tempo acaba, o Slurm encerra o job e o servidor desliga sozinho.
 
 ## Desenvolvimento

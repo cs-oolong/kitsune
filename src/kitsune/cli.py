@@ -19,7 +19,14 @@ from . import config
 from .chatlog.errors import ChatError
 from .chatlog.ledger import history as ledger_history, latest_chat, load_chat, read_chats, validate_chat_id
 from .chatlog.turn import run_turn
-from .client import save_api_key, tunnel
+from .client import (
+    clear_tunnel_info,
+    probe_shared_tunnel,
+    read_tunnel_info,
+    save_api_key,
+    save_tunnel_info,
+    tunnel,
+)
 from .cluster import Inventory, fetch_inventory
 from .estimate import OVERHEAD_GIB, ModelInfo, Plan, dtype_for, fetch_model_info, kv_gib, solve, weight_gib
 from .job import render_job_script
@@ -430,6 +437,14 @@ def _ready_server() -> tuple[str, dict[str, str]]:
     return job_id, state
 
 
+def _shared_tunnel_base(state: dict[str, str]) -> str | None:
+    """Base URL de um `kitsune tunnel` já aberto para ESTE servidor, ou None."""
+    info = read_tunnel_info(config.TUNNEL_INFO_FILE)
+    if info is None:
+        return None
+    return probe_shared_tunnel(info, state["TOKEN"])
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     text = " ".join(args.message).strip()
     if not text:
@@ -448,7 +463,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
         system_file = temp_path
     os.environ["KITSUNE_API_KEY"] = state["TOKEN"]
     try:
-        with tunnel(state["NODE"], int(state["PORT"])) as local_port:
+        shared = _shared_tunnel_base(state)
+        if shared is not None:
+            print(f"[via túnel compartilhado em {shared}]", file=sys.stderr)
             result = run_turn(
                 state["MODEL"],
                 text,
@@ -456,8 +473,19 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 ledger_dir=ledger_dir,
                 system_prompt_file=system_file,
                 provider_name=PROVIDER,
-                base_url=f"http://127.0.0.1:{local_port}/v1",
+                base_url=shared,
             )
+        else:
+            with tunnel(state["NODE"], int(state["PORT"])) as local_port:
+                result = run_turn(
+                    state["MODEL"],
+                    text,
+                    chat_id=args.chat,
+                    ledger_dir=ledger_dir,
+                    system_prompt_file=system_file,
+                    provider_name=PROVIDER,
+                    base_url=f"http://127.0.0.1:{local_port}/v1",
+                )
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
@@ -485,22 +513,28 @@ def cmd_tunnel(args: argparse.Namespace) -> int:
 
     save_api_key(state["TOKEN"], config.API_KEY_FILE)
     with tunnel(state["NODE"], int(state["PORT"]), local_port=args.port) as local_port:
-        print(f"Túnel aberto: http://127.0.0.1:{local_port}/v1 -> {state['NODE']}:{state['PORT']} (job {job_id})")
-        print(f"Modelo: {state['MODEL']}")
-        print(f"Chave: {config.API_KEY_FILE} (permissão 600)")
-        print("\nEm outro terminal:")
-        print(f'  export KITSUNE_API_KEY="$(cat {config.API_KEY_FILE})"')
-        body = json.dumps({"model": state["MODEL"], "messages": [{"role": "user", "content": "oi"}]}, ensure_ascii=False)
-        print(
-            f"  curl http://127.0.0.1:{local_port}/v1/chat/completions "
-            f'-H "Authorization: Bearer $KITSUNE_API_KEY" -H "Content-Type: application/json" -d \'{body}\''
-        )
-        print("\nCtrl-C fecha o túnel.")
+        info = {"job_id": job_id, "node": state["NODE"], "port": state["PORT"], "local_port": local_port}
+        save_tunnel_info(info, config.TUNNEL_INFO_FILE)
         try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\nTúnel fechado.")
+            print(f"Túnel aberto: http://127.0.0.1:{local_port}/v1 -> {state['NODE']}:{state['PORT']} (job {job_id})")
+            print(f"Modelo: {state['MODEL']}")
+            print(f"Chave: {config.API_KEY_FILE} (permissão 600)")
+            print("`kitsune chat` usa este túnel em vez de abrir um novo a cada turno.")
+            print("\nEm outro terminal:")
+            print(f'  export KITSUNE_API_KEY="$(cat {config.API_KEY_FILE})"')
+            body = json.dumps({"model": state["MODEL"], "messages": [{"role": "user", "content": "oi"}]}, ensure_ascii=False)
+            print(
+                f"  curl http://127.0.0.1:{local_port}/v1/chat/completions "
+                f'-H "Authorization: Bearer $KITSUNE_API_KEY" -H "Content-Type: application/json" -d \'{body}\''
+            )
+            print("\nCtrl-C fecha o túnel.")
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nTúnel fechado.")
+        finally:
+            clear_tunnel_info(config.TUNNEL_INFO_FILE)
     return 0
 
 

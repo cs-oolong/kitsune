@@ -51,6 +51,8 @@ GPU_SPECS = {
 MIN_COMPUTE_CAPABILITY = 7.5
 
 API_KEY_FILE = Path.home() / ".local" / "state" / "kitsune" / "api_key"
+# Publicado por `kitsune tunnel` enquanto aberto; `kitsune chat` reutiliza esse túnel.
+TUNNEL_INFO_FILE = Path.home() / ".local" / "state" / "kitsune" / "tunnel.json"
 TUNNEL_PORT = 8000
 # Pasta dos chats, relativa ao diretório de onde o comando roda.
 LEDGER_DIR = "ledger-kitsune"

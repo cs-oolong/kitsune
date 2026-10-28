@@ -85,3 +85,23 @@ def test_collect_status_reports_a_cancelled_last_job(monkeypatch):
     view = collect_status()
     assert view.situation == "ended"
     assert "foi cancelado" in view.lines[0]
+
+
+def test_shared_tunnel_base_none_without_published_tunnel(monkeypatch):
+    monkeypatch.setattr(cli, "read_tunnel_info", lambda path: None)
+    assert cli._shared_tunnel_base({"TOKEN": "abc"}) is None
+
+
+def test_shared_tunnel_base_probes_with_the_current_token(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "read_tunnel_info", lambda path: {"local_port": 8000})
+
+    def fake_probe(info, token):
+        seen.update(info)
+        seen["token"] = token
+        return "http://127.0.0.1:8000/v1"
+
+    monkeypatch.setattr(cli, "probe_shared_tunnel", fake_probe)
+    base = cli._shared_tunnel_base({"TOKEN": "token-atual"})
+    assert base == "http://127.0.0.1:8000/v1"
+    assert seen == {"local_port": 8000, "token": "token-atual"}
