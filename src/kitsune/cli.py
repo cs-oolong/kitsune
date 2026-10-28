@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -25,8 +26,10 @@ from .remote import (
     RemoteError,
     cancel,
     check_setup,
+    last_job,
     list_jobs,
     list_models,
+    read_log,
     read_state,
     run,
     setup_script,
@@ -38,9 +41,54 @@ PROVIDER = "kitsune"
 STATUS_LABEL = {
     "loading": "carregando o modelo",
     "ready": "pronto",
-    "failed": "falhou (veja os logs em ~/kitsune/logs)",
+    "failed": "falhou",
 }
 PREVIEW_CHARS = 60
+CAUSE_LOG_LINES = 300
+CAUSE_CHARS = 300
+END_REASON = {
+    "CANCELLED": "foi cancelado",
+    "TIMEOUT": "estourou o limite de tempo",
+    "COMPLETED": "encerrou",
+    "PREEMPTED": "foi preemptado",
+}
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_PID_PREFIX = re.compile(r"^\([A-Za-z_]+ pid=\d+\)\s*")
+_TRACEBACK = "Traceback (most recent call last)"
+_ERRORISH = re.compile(r"\berror\b|\bfailed\b|\bexception\b", re.IGNORECASE)
+
+
+def extract_cause(log_text: str) -> str | None:
+    """Melhor palpite sobre a causa da falha, a partir do fim do log do job.
+
+    Prefere a linha da exceção do último traceback; sem traceback, a última
+    linha com cara de erro. Tira códigos ANSI e o prefixo "(Worker pid=N)" do vLLM.
+    """
+    lines = [
+        _PID_PREFIX.sub("", _ANSI.sub("", raw)).strip()
+        for raw in log_text.replace("\r", "\n").splitlines()
+    ]
+    lines = [line for line in lines if line]
+    start = max((i for i, line in enumerate(lines) if _TRACEBACK in line), default=None)
+    if start is not None:
+        cause = None
+        skip_next = False  # linha de código-fonte logo abaixo de uma moldura "File ..."
+        for line in lines[start + 1 :]:
+            if line.startswith("File "):
+                skip_next = True
+                continue
+            if line.startswith(("^", "~")):
+                continue
+            if skip_next:
+                skip_next = False
+                continue
+            cause = line
+        if cause is not None:
+            return cause[:CAUSE_CHARS]
+    for line in reversed(lines):
+        if _ERRORISH.search(line):
+            return line[:CAUSE_CHARS]
+    return None
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -152,16 +200,52 @@ def cmd_start(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     jobs = list_jobs()
     if not jobs:
-        print("Nenhum servidor no ar. Use `kitsune start`.")
-        return 0
+        return _status_last_job()
     for job in jobs:
         if job.state == "RUNNING":
             state = read_state(job.job_id)
             label = STATUS_LABEL.get(state.get("STATUS", ""), "iniciando")
+            if state.get("STATUS") == "failed":
+                label += f" — veja com `kitsune logs {job.job_id}`"
             node = state.get("NODE", job.where)
             print(f"job {job.job_id}: {label} em {node} (rodando há {job.elapsed})")
         else:
             print(f"job {job.job_id}: {job.state.lower()} ({job.where}), tempo {job.elapsed}")
+    return 0
+
+
+def _status_last_job() -> int:
+    report = last_job()
+    if report is None:
+        print("Nenhum servidor no ar. Use `kitsune start`.")
+        return 0
+    slurm = (report.slurm_state or "").split()[0] if report.slurm_state else ""
+    if slurm == "FAILED" or report.state.get("STATUS") == "failed":
+        suffix = f" (saída {report.exit_code})" if report.exit_code else ""
+        print(f"Nenhum servidor no ar. O último job ({report.job_id}) falhou{suffix}.")
+        try:
+            _, log = read_log(report.job_id, lines=CAUSE_LOG_LINES)
+            cause = extract_cause(log)
+        except RemoteError:
+            cause = None
+        if cause:
+            print(f"Causa provável: {cause}")
+        print(f"Veja o log com: kitsune logs {report.job_id}")
+        return 0
+    reason = END_REASON.get(slurm)
+    if reason is None:
+        reason = f"encerrou ({slurm.lower()})" if slurm else "encerrou (parado ou tempo esgotado)"
+    print(f"Nenhum servidor no ar. O último job ({report.job_id}) {reason}. Use `kitsune start` para subir outro.")
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    job_id, text = read_log(args.job_id, lines=args.lines)
+    header = f"== ~/kitsune/logs/{job_id}.out"
+    if args.lines > 0:
+        header += f" (últimas {args.lines} linhas)"
+    print(header + " ==")
+    sys.stdout.write(text if text.endswith("\n") or not text else text + "\n")
     return 0
 
 
@@ -449,8 +533,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     start.set_defaults(func=cmd_start)
 
-    status = sub.add_parser("status", help="mostra se há um servidor no ar")
+    status = sub.add_parser("status", help="mostra se há um servidor no ar; sem job vivo, o que aconteceu com o último")
     status.set_defaults(func=cmd_status)
+
+    logs = sub.add_parser("logs", help="mostra o log de um job (o mais recente, se não passar o id)")
+    logs.add_argument("job_id", nargs="?", metavar="JOBID", help="id do job no Slurm (padrão: o mais recente)")
+    logs.add_argument("--lines", type=int, default=CAUSE_LOG_LINES // 6, help="quantas linhas do fim mostrar; 0 = o log inteiro (padrão: %(default)s)")
+    logs.set_defaults(func=cmd_logs)
 
     chat = sub.add_parser("chat", help="manda uma mensagem ao modelo e grava em ledger-kitsune/")
     chat.add_argument("message", nargs="+")

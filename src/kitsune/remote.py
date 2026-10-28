@@ -18,8 +18,24 @@ from .config import (
 
 JOB_NAME = "kitsune"
 SQUEUE_FORMAT = "%i|%T|%R|%M"
+SACCT_FORMAT = "JobID,State,ExitCode"
 MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
 REPO_MARKER = ".kitsune-repo"
+# Sonda do último job: o sacct cobre jobs que morreram antes de gravar o state;
+# o state cobre clusters sem contabilidade. Linhas com "|" são do sacct, com "=" do state.
+LAST_JOB_SCRIPT = f"""sacct -X -P --noheader --name={JOB_NAME} --format={SACCT_FORMAT} 2>/dev/null | tail -n 1
+latest=$(ls -t "$HOME/{REMOTE_ROOT}/state"/*.env 2>/dev/null | head -n 1)
+if [ -n "$latest" ]; then cat "$latest"; fi
+"""
+LOG_SCRIPT = """if [ -n "{job_id}" ]; then
+    f="$HOME/{root}/logs/{job_id}.out"
+else
+    f=$(ls -t "$HOME/{root}/logs"/*.out 2>/dev/null | head -n 1)
+fi
+[ -n "$f" ] && [ -f "$f" ] || exit 1
+echo "JOB=$(basename "$f" .out)"
+if [ {lines} -gt 0 ]; then tail -n {lines} "$f"; else cat "$f"; fi
+"""
 MODELS_SCRIPT = """for dir in "$HOME/kitsune/models"/*/; do
     [ -d "$dir" ] || continue
     name=$(basename "$dir")
@@ -49,6 +65,14 @@ class ModelEntry:
     repo: str
     size: str
     complete: bool
+
+
+@dataclass(frozen=True)
+class LastJob:
+    job_id: str
+    slurm_state: str | None
+    exit_code: str | None
+    state: dict[str, str]
 
 
 def validate_model(model: str) -> str:
@@ -118,6 +142,48 @@ def read_state(job_id: str) -> dict[str, str]:
     _check_job_id(job_id)
     result = run(f'cat "$HOME/{REMOTE_ROOT}/state/{job_id}.env"', capture=True, check=False)
     return parse_state(result.stdout) if result.returncode == 0 else {}
+
+
+def parse_last_job(text: str) -> LastJob | None:
+    slurm_id = None
+    slurm_state = None
+    exit_code = None
+    state_lines = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "|" in line:
+            parts = line.split("|")
+            if len(parts) == 3 and parts[0].isdigit():
+                slurm_id, slurm_state, exit_code = parts
+        elif "=" in line:
+            state_lines.append(line)
+    state = parse_state("\n".join(state_lines))
+    job_id = slurm_id or state.get("JOBID")
+    if job_id is None:
+        return None
+    if state.get("JOBID") not in (None, job_id):
+        # O state é de um job mais antigo que o do sacct; não mistura os dois.
+        state = {}
+    return LastJob(job_id=job_id, slurm_state=slurm_state, exit_code=exit_code, state=state)
+
+
+def last_job() -> LastJob | None:
+    return parse_last_job(run("bash -s", stdin_text=LAST_JOB_SCRIPT, check=False).stdout)
+
+
+def read_log(job_id: str | None, lines: int) -> tuple[str, str]:
+    """Devolve (job_id, trecho do log). Sem job_id, lê o log mais recente."""
+    if job_id is not None:
+        _check_job_id(job_id)
+    script = LOG_SCRIPT.format(job_id=job_id or "", root=REMOTE_ROOT, lines=int(lines))
+    result = run("bash -s", stdin_text=script, check=False)
+    if result.returncode != 0:
+        alvo = job_id or "mais recente"
+        raise RemoteError(f"sem log para o job {alvo} (~/kitsune/logs vazio ou inexistente).")
+    header, _, text = result.stdout.partition("\n")
+    return header.removeprefix("JOB="), text
 
 
 def check_setup(model: str) -> None:

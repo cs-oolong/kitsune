@@ -36,7 +36,9 @@ kitsune cluster               # GPUs livres por partição, nós fora do ar e fi
 kitsune suggest --model Qwen/Qwen2.5-7B-Instruct   # mostra o plano sem enviar
 kitsune start                 # calcula o plano e envia o job ao Slurm (1 hora)
 kitsune start --gpus 2 --max-len 8192              # overrides pontuais
-kitsune status                # fila, carregando, pronto
+kitsune status                # fila, carregando, pronto; sem job no ar, o destino do último job
+kitsune logs                  # últimas 50 linhas do log do job mais recente
+kitsune logs 121897 --lines 0 # log inteiro de um job específico
 kitsune chat "oi, tudo bem?"                             # sem -c: chat novo (usa system_prompt.txt)
 kitsune chat --system "Responda em português." "..."     # chat novo com instrução de sistema
 kitsune chat -c chat-20261027T194108Z-16b5a5 "continua"  # continua um chat existente (precisa existir)
@@ -83,7 +85,8 @@ Para qualquer programa que aceite uma API no formato da OpenAI, use como URL bas
 ## Como funciona
 
 - `setup` instala o vLLM num venv em `~/kitsune/venv` e baixa o modelo para `~/kitsune/models/`.
-- `start` envia um script de batch pela entrada padrão do `sbatch`. O job escolhe uma porta livre, gera um token novo e sobe `vllm serve` com `--host 0.0.0.0`. Ele grava nó, porta, token e status em `~/kitsune/state/<jobid>.env` (permissão 600). O log do job fica em `~/kitsune/logs/<jobid>.out`.
+- `start` envia um script de batch pela entrada padrão do `sbatch`. O job escolhe uma porta livre, gera um token novo e sobe `vllm serve` com `--host 0.0.0.0`. Ele grava nó, porta, token e status em `~/kitsune/state/<jobid>.env` (permissão 600). O log do job fica em `~/kitsune/logs/<jobid>.out` e se lê do laptop com `kitsune logs`.
+- Quando não há job no ar, `status` reconstrói o destino do último job (pelo `sacct` e pelo arquivo de estado): se falhou, mostra o código de saída e a causa provável extraída do log; se foi cancelado ou estourou o tempo, diz isso em vez de parecer que nunca existiu.
 - `chat` lê o arquivo de estado, abre um túnel `ssh -L` até o nó e chama `/v1/chat/completions` com o token como `Bearer`.
 - Quando o limite de tempo acaba, o Slurm encerra o job e o servidor desliga sozinho.
 
