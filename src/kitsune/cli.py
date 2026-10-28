@@ -19,7 +19,7 @@ from .chatlog.ledger import history as ledger_history, latest_chat, load_chat, r
 from .chatlog.turn import run_turn
 from .client import save_api_key, tunnel
 from .cluster import Inventory, fetch_inventory
-from .estimate import OVERHEAD_GIB, dtype_for, fetch_model_info, kv_gib, suggest, weight_gib
+from .estimate import OVERHEAD_GIB, ModelInfo, Plan, dtype_for, fetch_model_info, kv_gib, solve, weight_gib
 from .job import render_job_script
 from .remote import (
     RemoteError,
@@ -41,7 +41,6 @@ STATUS_LABEL = {
     "failed": "falhou (veja os logs em ~/kitsune/logs)",
 }
 PREVIEW_CHARS = 60
-SUGGEST_WIDER_UTIL = 0.9
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -78,39 +77,74 @@ def cmd_start(args: argparse.Namespace) -> int:
             f"já existe um kitsune no ar (job {job.job_id}, {job.state}). Use `kitsune stop` antes."
         )
     inventory = fetch_inventory()
-    partition = inventory.partition(args.partition)
-    if partition is None:
-        raise RemoteError(f"a partição {args.partition} não existe. Veja `kitsune cluster`.")
-    if partition.max_node_gpus == 0:
-        raise RemoteError(f"a partição {args.partition} não tem nenhum nó utilizável agora.")
-    if args.gpus > partition.max_node_gpus:
-        raise RemoteError(
-            f"a partição {args.partition} tem no máximo {partition.max_node_gpus} GPU(s) por nó; "
-            f"você pediu {args.gpus}."
+    manual = (args.partition, args.gpus, args.gpu_util, args.max_len)
+    if all(value is not None for value in manual):
+        # Caminho manual: as quatro flags dispensam a consulta ao Hugging Face.
+        partition = inventory.partition(args.partition)
+        if partition is None:
+            raise RemoteError(f"a partição {args.partition} não existe. Veja `kitsune cluster`.")
+        if partition.max_node_gpus == 0:
+            raise RemoteError(f"a partição {args.partition} não tem nenhum nó utilizável agora.")
+        if args.gpus > partition.max_node_gpus:
+            raise RemoteError(
+                f"a partição {args.partition} tem no máximo {partition.max_node_gpus} GPU(s) por nó; "
+                f"você pediu {args.gpus}."
+            )
+        capability = config.GPU_SPECS.get(partition.gpu_type or "", (0, 0.0))[1]
+        plan_kwargs = {
+            "partition": partition.name,
+            "gpus": args.gpus,
+            "gpu_util": args.gpu_util,
+            "max_len": args.max_len,
+            "dtype": dtype_for(capability) if capability else "auto",
+        }
+        fits_now = partition.max_node_free >= args.gpus
+        print(
+            f"Configuração manual: {partition.name}, {args.gpus} GPU(s), gpu-util {args.gpu_util}, "
+            f"contexto {args.max_len}, dtype {plan_kwargs['dtype']}."
         )
-    capability = config.GPU_SPECS.get(partition.gpu_type or "", (0, 0.0))[1]
-    dtype = dtype_for(capability) if capability else "auto"
+    else:
+        partitions = inventory.partitions()
+        if args.partition is not None:
+            only = inventory.partition(args.partition)
+            if only is None:
+                raise RemoteError(f"a partição {args.partition} não existe. Veja `kitsune cluster`.")
+            partitions = [only]
+        try:
+            info = fetch_model_info(model)
+        except ValueError as error:
+            raise RemoteError(
+                f"{error} Sem a consulta ao Hugging Face não dá para calcular o plano; "
+                "passe --partition, --gpus, --gpu-util e --max-len explicitamente."
+            ) from error
+        plans, rejected = solve(info, partitions, max_len=args.max_len, gpu_util=args.gpu_util, gpus=args.gpus)
+        if not plans:
+            why = "; ".join(f"{item.partition}: {item.reason}" for item in rejected) or "nenhuma partição com GPU"
+            raise RemoteError(f"nenhuma configuração serve para {model}: {why}")
+        plan = plans[0]
+        plan_kwargs = {
+            "partition": plan.partition,
+            "gpus": plan.gpus,
+            "gpu_util": plan.gpu_util,
+            "max_len": plan.max_len,
+            "dtype": plan.dtype,
+        }
+        fits_now = plan.fits_now
+        print("Plano: " + _plan_line(plan, info))
 
     check_setup(model)
     script = render_job_script(
         model,
-        partition=args.partition,
-        gpus=args.gpus,
-        cpus=args.cpus,
-        mem=args.mem,
+        cpus=config.DEFAULT_CPUS,
+        mem=config.DEFAULT_MEM,
         time=args.time,
-        dtype=dtype,
-        gpu_util=args.gpu_util,
-        max_len=args.max_len,
         trust_remote_code=args.trust_remote_code,
+        **plan_kwargs,
     )
     job_id = submit(script)
-    print(f"Job {job_id} enviado: {model} em {args.partition}, {args.gpus} GPU, limite {args.time}.")
-    if partition.max_node_free < args.gpus:
-        print(
-            f"Aviso: agora não há {args.gpus} GPU(s) livres num nó da {args.partition} "
-            f"(maior nó livre: {partition.max_node_free}). O job vai esperar na fila."
-        )
+    print(f"Job {job_id} enviado: {model} em {plan_kwargs['partition']}, {plan_kwargs['gpus']} GPU, limite {args.time}.")
+    if not fits_now:
+        print("Aviso: agora não há GPUs suficientes livres num nó. O job vai esperar na fila.")
     print("Acompanhe com: kitsune status")
     return 0
 
@@ -165,41 +199,44 @@ def cmd_suggest(args: argparse.Namespace) -> int:
     model = validate_model(args.model)
     info = fetch_model_info(model)
     partitions = fetch_inventory().partitions()
-    suggestions, rejected = suggest(info, partitions, gpu_util=args.gpu_util, max_len=args.max_len)
+    if args.partition is not None:
+        only = next((part for part in partitions if part.name == args.partition), None)
+        if only is None:
+            raise RemoteError(f"a partição {args.partition} não existe. Veja `kitsune cluster`.")
+        partitions = [only]
+    plans, rejected = solve(info, partitions, max_len=args.max_len, gpu_util=args.gpu_util, gpus=args.gpus)
 
+    ceiling = args.gpu_util if args.gpu_util is not None else config.GPU_UTIL_CEILING
+    target = args.max_len or info.native_max_len or config.MIN_CONTEXT
+    native = str(info.native_max_len) if info.native_max_len else f"desconhecido; usando o piso {config.MIN_CONTEXT}"
     print(f"Modelo {model}")
     print(
-        f"  pesos {weight_gib(info):.2f} GiB; KV cache para {args.max_len} tokens "
-        f"{kv_gib(info, args.max_len):.2f} GiB; overhead {OVERHEAD_GIB:.0f} GiB por GPU"
+        f"  pesos {weight_gib(info):.2f} GiB; KV cache para {target} tokens {kv_gib(info, target):.2f} GiB; "
+        f"overhead {OVERHEAD_GIB:.0f} GiB por GPU"
     )
-    print(f"  cada GPU usa gpu-util {args.gpu_util} da memória dela\n")
+    print(f"  contexto nativo {native}; teto de gpu-util {ceiling}\n")
 
-    if suggestions:
-        best = suggestions[0]
+    if plans:
+        best = plans[0]
         print("Recomendado:")
-        print(f"  {_start_command(model, best.partition, best.gpus, args.gpu_util, args.max_len)}")
-        print(
-            f"  {best.partition} ({best.gpu_type}), {best.gpus} GPU(s), dtype {best.dtype}; "
-            f"precisa {best.need_gib:.1f} GiB por GPU, tem {best.usable_gib:.1f} GiB"
-        )
-        if best.free_now < best.gpus:
+        print(f"  {_start_command(model, args)}")
+        print("  " + _plan_line(best, info))
+        if not best.fits_now:
             print(f"  atenção: agora não há {best.gpus} GPU(s) livres num nó; vai esperar na fila")
-        if len(suggestions) > 1:
+        if len(plans) > 1:
             print("\nOutras opções:")
-            for option in suggestions[1:]:
+            for option in plans[1:]:
                 print(
-                    f"  {option.partition} ({option.gpu_type}): {option.gpus} GPU(s), "
-                    f"livres agora {option.free_now}, fila {option.pending}"
+                    f"  {option.partition} ({option.gpu_type}): {option.gpus} GPU(s), gpu-util {option.gpu_util}, "
+                    f"contexto {option.max_len}, livres agora {option.free_now}, fila {option.pending}"
                 )
     else:
         print("Nenhuma partição serve com essa configuração.")
-        wider, _ = suggest(info, partitions, gpu_util=SUGGEST_WIDER_UTIL, max_len=args.max_len)
-        if wider:
-            names = ", ".join(f"{s.partition} ({s.gpus} GPU)" for s in wider)
-            print(
-                f"Com gpu-util {SUGGEST_WIDER_UTIL} caberia em: {names}. "
-                "Isso exige a GPU quase toda livre, então pode falhar em GPU compartilhada."
-            )
+        if args.gpu_util is not None:
+            wider, _ = solve(info, partitions, max_len=args.max_len, gpus=args.gpus)
+            if wider:
+                names = ", ".join(f"{plan.partition} ({plan.gpus} GPU)" for plan in wider)
+                print(f"Com gpu-util automático (teto {config.GPU_UTIL_CEILING}) caberia em: {names}.")
 
     if rejected:
         print("\nDescartadas:")
@@ -208,10 +245,22 @@ def cmd_suggest(args: argparse.Namespace) -> int:
     return 0
 
 
-def _start_command(model: str, partition: str, gpus: int, gpu_util: float, max_len: int) -> str:
+def _start_command(model: str, args: argparse.Namespace) -> str:
+    parts = ["kitsune start", f"--model {model}"]
+    for flag in ("partition", "gpus", "gpu_util", "max_len"):
+        value = getattr(args, flag, None)
+        if value is not None:
+            parts.append(f"--{flag.replace('_', '-')} {value}")
+    return " ".join(parts)
+
+
+def _plan_line(plan: Plan, info: ModelInfo) -> str:
+    context = f"contexto {plan.max_len}"
+    if info.native_max_len:
+        context += " (nativo)" if plan.full_context else f" (limitado; o nativo é {info.native_max_len})"
     return (
-        f"kitsune start --model {model} --partition {partition} --gpus {gpus} "
-        f"--gpu-util {gpu_util} --max-len {max_len}"
+        f"{plan.partition} ({plan.gpu_type}), {plan.gpus} GPU(s), dtype {plan.dtype}, "
+        f"gpu-util {plan.gpu_util}, {context}; precisa {plan.need_gib:.1f} GiB por GPU"
     )
 
 
@@ -378,21 +427,21 @@ def build_parser() -> argparse.ArgumentParser:
     cluster = sub.add_parser("cluster", help="mostra GPUs livres por partição e a fila")
     cluster.set_defaults(func=cmd_cluster)
 
-    suggest_cmd = sub.add_parser("suggest", help="sugere partição e número de GPUs para um modelo")
+    suggest_cmd = sub.add_parser("suggest", help="mostra o plano (partição, GPUs, gpu-util, contexto) sem enviar")
     suggest_cmd.add_argument("--model", default=config.DEFAULT_MODEL, help="autor/repo do Hugging Face")
-    suggest_cmd.add_argument("--gpu-util", type=float, default=config.GPU_MEMORY_UTILIZATION)
-    suggest_cmd.add_argument("--max-len", type=int, default=config.MAX_MODEL_LEN)
+    suggest_cmd.add_argument("--partition", default=None, help="e se eu usar esta partição? (padrão: todas)")
+    suggest_cmd.add_argument("--gpus", type=int, default=None, help="e se eu pedir este número de GPUs? (padrão: calculado)")
+    suggest_cmd.add_argument("--gpu-util", type=float, default=None, help="e se o teto de gpu-util for este? (padrão: %(default)s = automático)")
+    suggest_cmd.add_argument("--max-len", type=int, default=None, help="e se o contexto for este? (padrão: o nativo do modelo)")
     suggest_cmd.set_defaults(func=cmd_suggest)
 
-    start = sub.add_parser("start", help="sobe o modelo num nó de GPU")
+    start = sub.add_parser("start", help="calcula o plano e sobe o modelo num nó de GPU")
     start.add_argument("--model", default=config.DEFAULT_MODEL, help="autor/repo do Hugging Face")
-    start.add_argument("--partition", default=config.DEFAULT_PARTITION)
-    start.add_argument("--gpus", type=int, default=config.DEFAULT_GPUS)
-    start.add_argument("--cpus", type=int, default=config.DEFAULT_CPUS)
-    start.add_argument("--mem", default=config.DEFAULT_MEM)
+    start.add_argument("--partition", default=None, help="override; sem flag, o solucionador escolhe")
+    start.add_argument("--gpus", type=int, default=None, help="override; sem flag, o solucionador escolhe")
     start.add_argument("--time", default=config.DEFAULT_TIME, help="limite do job, HH:MM:SS")
-    start.add_argument("--gpu-util", type=float, default=config.GPU_MEMORY_UTILIZATION)
-    start.add_argument("--max-len", type=int, default=config.MAX_MODEL_LEN)
+    start.add_argument("--gpu-util", type=float, default=None, help="override; sem flag, derivado do que o modelo precisa")
+    start.add_argument("--max-len", type=int, default=None, help="override; sem flag, o contexto nativo do modelo (limitado ao que cabe)")
     start.add_argument(
         "--trust-remote-code",
         action="store_true",

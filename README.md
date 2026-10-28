@@ -33,9 +33,9 @@ uv tool install --force git+https://github.com/cs-oolong/kitsune
 kitsune setup                 # uma vez: uv, vLLM e o modelo no headnode
 kitsune models                # modelos baixados no headnode, com tamanho e status
 kitsune cluster               # GPUs livres por partição, nós fora do ar e fila
-kitsune suggest --model Qwen/Qwen2.5-7B-Instruct   # qual partição e quantas GPUs pedir
-kitsune start                 # envia o job ao Slurm (1 hora, 1 GPU na l40s)
-kitsune start --partition rtx8000 --gpus 2 --gpu-util 0.3
+kitsune suggest --model Qwen/Qwen2.5-7B-Instruct   # mostra o plano sem enviar
+kitsune start                 # calcula o plano e envia o job ao Slurm (1 hora)
+kitsune start --gpus 2 --max-len 8192              # overrides pontuais
 kitsune status                # fila, carregando, pronto
 kitsune chat "oi, tudo bem?"                             # sem -c: chat novo (usa system_prompt.txt)
 kitsune chat --system "Responda em português." "..."     # chat novo com instrução de sistema
@@ -47,11 +47,11 @@ kitsune tunnel                # abre um túnel para outros programas usarem a AP
 kitsune stop                  # cancela antes da 1 hora
 ```
 
-Opções úteis: `--model autor/repo`, `--partition`, `--gpus`, `--mem`, `--time`, `--gpu-util`, `--max-len`. O padrão de modelo é `Qwen/Qwen2.5-0.5B-Instruct`, pequeno, para testar o fluxo. Todos os padrões ficam em `src/kitsune/config.py`.
+O padrão de modelo é `Qwen/Qwen2.5-0.5B-Instruct`, pequeno, para testar o fluxo. Os padrões ficam em `src/kitsune/config.py`.
 
-Para escolher a partição e o número de GPUs, rode `kitsune suggest` antes de `kitsune start`. Ele consulta o Hugging Face (tamanho dos pesos e formato das camadas) e o estado atual do cluster. Calcula a memória por GPU para cada número válido de GPUs (`--tensor-parallel-size` precisa dividir o número de cabeças de atenção) e sugere a partição com menos fila entre as que cabem agora. Ele também descarta partições que o vLLM não suporta: GPUs com compute capability abaixo de 7.5 (mínimo da documentação do vLLM), como a P5000.
+`kitsune start` calcula o plano sozinho: consulta o Hugging Face (tamanho dos pesos, formato das camadas e contexto nativo do modelo) e o estado atual do cluster, e deriva partição, número de GPUs, gpu-util e comprimento de contexto. O contexto alvo é o nativo do modelo (`max_position_embeddings`), limitado ao que couber no teto de gpu-util (0.9); se não couber, o plano avisa até onde dá. O gpu-util é o mínimo que comporta pesos + KV cache + overhead — nada de tunar na mão. `--partition`, `--gpus`, `--gpu-util` e `--max-len` existem como overrides; passando os quatro, `start` nem consulta o Hugging Face (útil sem rede). `--time` (padrão 1 hora) e `--trust-remote-code` continuam decisões suas.
 
-`kitsune start` lê a partição no cluster antes de enviar o job. Recusa partição inexistente e número de GPUs acima do que um nó tem. Usa `--dtype half` em GPUs com compute capability abaixo de 8.0, como as Turing (RTX 8000 e RTX 5000), porque o vLLM não roda bf16 nelas.
+`kitsune suggest` mostra o mesmo plano sem enviar nada: o recomendado, as alternativas e por que cada partição foi descartada. Com flags (`--partition`, `--gpus`, `--gpu-util`, `--max-len`) vira modo "e se?". O solucionador descarta partições que o vLLM não suporta (compute capability abaixo de 7.5, como a P5000) e usa `--dtype half` em GPUs abaixo de 8.0, como as Turing, porque o vLLM não roda bf16 nelas. O desenho está em `DESIGN.md`.
 
 ## Chats
 

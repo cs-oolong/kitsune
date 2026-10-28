@@ -1,15 +1,22 @@
-"""Quanto de GPU um modelo precisa no vLLM, e em qual partição do cluster cabe."""
+"""Quanto de GPU um modelo precisa no vLLM, e qual configuração pedir ao Slurm.
+
+O solucionador (`solve`) cruza o modelo (tamanho dos pesos, formato das camadas
+e contexto nativo, lidos do Hugging Face) com o inventário do cluster e devolve
+planos completos: partição, número de GPUs, gpu-util derivado e comprimento de
+contexto. As flags de `start`/`suggest` são overrides sobre essa derivação.
+"""
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
 from .cluster import Partition
-from .config import GPU_SPECS, MIN_COMPUTE_CAPABILITY
+from .config import GPU_SPECS, GPU_UTIL_CEILING, MIN_COMPUTE_CAPABILITY, MIN_CONTEXT
 
 GIB = 1024**3
 OVERHEAD_GIB = 2.0
@@ -39,6 +46,8 @@ class ModelInfo:
     heads: int
     kv_heads: int
     head_dim: int
+    # max_position_embeddings do config.json; None se o campo não existir.
+    native_max_len: int | None
 
     @property
     def kv_bytes_per_token(self) -> int:
@@ -46,15 +55,19 @@ class ModelInfo:
 
 
 @dataclass(frozen=True)
-class Suggestion:
+class Plan:
     partition: str
     gpu_type: str
     gpus: int
-    need_gib: float
-    usable_gib: float
+    gpu_util: float
+    max_len: int
     dtype: str
+    need_gib: float
+    fits_now: bool
     free_now: int
     pending: int
+    # True quando o plano serve o contexto alvo inteiro (o nativo, ou o pedido).
+    full_context: bool
 
 
 @dataclass(frozen=True)
@@ -74,16 +87,21 @@ def parse_model_info(repo: str, api: dict, config: dict) -> ModelInfo:
         raise ValueError(f"{repo}: não achei o tamanho dos pesos (o repositório tem safetensors?)")
     try:
         heads = int(config["num_attention_heads"])
-        return ModelInfo(
+        info = ModelInfo(
             repo=repo,
             weight_bytes=weight_bytes,
             layers=int(config["num_hidden_layers"]),
             heads=heads,
             kv_heads=int(config.get("num_key_value_heads", heads)),
             head_dim=int(config.get("head_dim") or int(config["hidden_size"]) // heads),
+            native_max_len=None,
         )
     except KeyError as error:
         raise ValueError(f"{repo}: config.json sem o campo {error}") from error
+    native = config.get("max_position_embeddings")
+    if native is not None:
+        info = ModelInfo(**{**info.__dict__, "native_max_len": int(native)})
+    return info
 
 
 def _get_json(url: str, token: str | None) -> dict:
@@ -122,14 +140,37 @@ def dtype_for(compute_capability: float) -> str:
     return "half" if compute_capability < BF16_MIN_COMPUTE_CAPABILITY else "auto"
 
 
-def suggest(
+def _ctx_fit(info: ModelInfo, tensor_parallel: int, mem_gib: float, ceiling: float) -> int:
+    """Maior contexto cujo KV cabe no teto de memória, com esse paralelismo."""
+    room_gib = tensor_parallel * (mem_gib * ceiling - OVERHEAD_GIB) - weight_gib(info)
+    if room_gib <= 0:
+        return 0
+    return int(room_gib * GIB / info.kv_bytes_per_token)
+
+
+def _ceil_util(need_gib: float, mem_gib: float) -> float:
+    """gpu-util derivado, arredondado para cima em 2 casas (margem mínima)."""
+    return math.ceil(need_gib / mem_gib * 100) / 100
+
+
+def solve(
     info: ModelInfo,
     partitions: list[Partition],
     *,
-    gpu_util: float,
-    max_len: int,
-) -> tuple[list[Suggestion], list[Rejection]]:
-    suggestions: list[Suggestion] = []
+    max_len: int | None = None,
+    gpu_util: float | None = None,
+    gpus: int | None = None,
+) -> tuple[list[Plan], list[Rejection]]:
+    """Deriva planos (partição, GPUs, gpu-util, contexto) para o modelo.
+
+    Sem overrides, o alvo é o contexto nativo do modelo (ou MIN_CONTEXT se o
+    config.json não disser qual é) e o teto de gpu-util é GPU_UTIL_CEILING.
+    Com overrides, eles viram o próprio alvo/teto.
+    """
+    ceiling = gpu_util if gpu_util is not None else GPU_UTIL_CEILING
+    target = max_len or info.native_max_len or MIN_CONTEXT
+    floor = max_len or MIN_CONTEXT
+    plans: list[Plan] = []
     rejections: list[Rejection] = []
     for part in partitions:
         if part.gpu_type is None:
@@ -148,8 +189,19 @@ def suggest(
             )
             continue
 
-        usable = mem_gib * gpu_util
         valid = [tp for tp in TP_CHOICES if tp <= part.max_node_gpus and info.heads % tp == 0]
+        if gpus is not None:
+            if gpus > part.max_node_gpus:
+                rejections.append(
+                    Rejection(part.name, f"tem no máximo {part.max_node_gpus} GPU(s) por nó; você pediu {gpus}")
+                )
+                continue
+            if info.heads % gpus != 0:
+                rejections.append(
+                    Rejection(part.name, f"{gpus} GPU(s) não divide(m) as {info.heads} cabeças de atenção")
+                )
+                continue
+            valid = [gpus]
         if not valid:
             rejections.append(
                 Rejection(
@@ -158,29 +210,47 @@ def suggest(
                 )
             )
             continue
-        fit = next((tp for tp in valid if required_gib(info, tp, max_len) <= usable), None)
-        if fit is None:
-            need = required_gib(info, valid[-1], max_len)
-            rejections.append(
-                Rejection(
-                    part.name,
-                    f"não cabe nem com {valid[-1]} GPU(s): precisa de {need:.1f} GiB por GPU, "
-                    f"a GPU tem {usable:.1f} GiB utilizáveis com gpu-util {gpu_util}",
-                )
-            )
-            continue
-        suggestions.append(
-            Suggestion(
+
+        best: Plan | None = None
+        for tp in valid:
+            fit = _ctx_fit(info, tp, mem_gib, ceiling)
+            if fit < floor:
+                continue
+            chosen = min(target, fit)
+            need = required_gib(info, tp, chosen)
+            plan = Plan(
                 partition=part.name,
                 gpu_type=part.gpu_type,
-                gpus=fit,
-                need_gib=required_gib(info, fit, max_len),
-                usable_gib=usable,
+                gpus=tp,
+                gpu_util=gpu_util if gpu_util is not None else _ceil_util(need, mem_gib),
+                max_len=chosen,
                 dtype=dtype_for(capability),
+                need_gib=need,
+                fits_now=part.max_node_free >= tp,
                 free_now=part.max_node_free,
                 pending=part.pending,
+                full_context=chosen == target,
             )
-        )
+            if plan.full_context:
+                best = plan  # tp cresce na ordem de `valid`: o primeiro que serve tudo é o menor
+                break
+            if best is None or plan.max_len > best.max_len:
+                best = plan
+        if best is None:
+            fit = _ctx_fit(info, valid[-1], mem_gib, ceiling)
+            if max_len is not None:
+                reason = (
+                    f"com {valid[-1]} GPU(s) e gpu-util {ceiling} cabem {fit} tokens de contexto; "
+                    f"você pediu {max_len}"
+                )
+            else:
+                reason = (
+                    f"nem o mínimo de {MIN_CONTEXT} tokens cabe com {valid[-1]} GPU(s) e "
+                    f"gpu-util até {ceiling} (cabem {fit})"
+                )
+            rejections.append(Rejection(part.name, reason))
+            continue
+        plans.append(best)
 
-    suggestions.sort(key=lambda s: (s.free_now < s.gpus, s.gpus, s.pending, s.partition))
-    return suggestions, rejections
+    plans.sort(key=lambda p: (not p.full_context, not p.fits_now, p.gpus, p.gpu_util, p.partition))
+    return plans, rejections

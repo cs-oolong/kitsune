@@ -9,8 +9,6 @@ HOST = os.environ.get("KITSUNE_HOST", "headnode")
 REMOTE_ROOT = "kitsune"
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-DEFAULT_PARTITION = "l40s"
-DEFAULT_GPUS = 1
 DEFAULT_CPUS = 4
 DEFAULT_MEM = "16G"
 DEFAULT_TIME = "01:00:00"
@@ -22,8 +20,13 @@ VLLM_VERSION = "0.8.5"
 TORCH_VERSION = "2.6.0"
 # transformers 5.x removou atributos que o vLLM 0.8.5 usa (all_special_tokens_extended).
 TRANSFORMERS_VERSION = "4.51.3"
-MAX_MODEL_LEN = 4096
-GPU_MEMORY_UTILIZATION = 0.3
+
+# Dimensionamento automático (ver DESIGN.md). O solucionador deriva o gpu-util do
+# que o modelo precisa, limitado por este teto; 0.9 é o próprio padrão do vLLM e
+# pressupõe GPU exclusiva via gres do Slurm.
+GPU_UTIL_CEILING = 0.9
+# Contexto mínimo aceitável num plano automático; abaixo disso, a partição é recusada.
+MIN_CONTEXT = 4096
 
 # Tipo de GPU (como aparece no Gres do Slurm) -> (memória em GiB, compute capability).
 # Fontes, por tipo:
