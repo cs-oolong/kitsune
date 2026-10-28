@@ -45,6 +45,12 @@ def test_tensor_parallel_matches_the_number_of_gpus():
     assert "--tensor-parallel-size 2 " in render(gpus=2)
 
 
+def test_custom_all_reduce_is_disabled_permanently():
+    # vllm#26480: TP em Ampere + cudagraph FULL + prefix caching gerava saída vazia
+    assert "--disable-custom-all-reduce" in render(gpus=2)
+    assert "--disable-custom-all-reduce" in render(gpus=1)
+
+
 def test_dtype_and_memory_settings_reach_vllm():
     script = render(dtype="half")
     assert "--dtype half" in script
@@ -54,9 +60,9 @@ def test_dtype_and_memory_settings_reach_vllm():
 
 def test_trust_remote_code_is_passed_only_when_asked():
     assert "--trust-remote-code" not in render()
-    assert "--gpu-memory-utilization 0.3 &" in render()
+    assert "--gpu-memory-utilization 0.3 --disable-custom-all-reduce &" in render()
     script = render(trust_remote_code=True)
-    assert "--gpu-memory-utilization 0.3 --trust-remote-code &" in script
+    assert "--gpu-memory-utilization 0.3 --disable-custom-all-reduce --trust-remote-code &" in script
 
 
 def test_model_is_loaded_offline_from_the_local_folder():

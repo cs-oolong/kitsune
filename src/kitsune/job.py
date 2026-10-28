@@ -1,5 +1,10 @@
 """Script de batch que sobe o vLLM num nó de GPU.
 
+--disable-custom-all-reduce é permanente: com TP >= 2 em GPUs Ampere, o custom
+all-reduce do vLLM interage mal com cudagraph FULL + prefix caching e a geração
+vaza vazia até estourar max_tokens (vllm#26480, corrigido em vllm-project/vllm#30887
+mas só em releases que exigem CUDA mais nova que a do cluster).
+
 O script vai pela entrada padrão do sbatch, então nada precisa ser copiado para o
 headnode antes do envio. O token é gerado no próprio nó e fica só no arquivo de
 estado, com permissão 600; nunca aparece na linha de comando.
@@ -45,7 +50,7 @@ write_state loading
 export VLLM_API_KEY="$TOKEN"
 "$VENV/bin/vllm" serve "$MODEL_DIR" --served-model-name {name_quoted} --host 0.0.0.0 --port "$PORT" \\
     --tensor-parallel-size {gpus} --dtype {dtype} --max-model-len {max_len} \\
-    --gpu-memory-utilization {gpu_util}{trust_flag} &
+    --gpu-memory-utilization {gpu_util} --disable-custom-all-reduce{trust_flag} &
 SERVER=$!
 
 until "$VENV/bin/python" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$PORT/health', timeout=2)" 2>/dev/null; do

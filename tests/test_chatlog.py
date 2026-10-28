@@ -55,6 +55,18 @@ def test_new_chat_is_recorded_in_the_ledger_format(tmp_path, server):
     assert chat["messages"][1]["meta"]["base_url"] == server
 
 
+def test_max_tokens_is_recorded_in_meta(tmp_path, server):
+    prompt = tmp_path / "system_prompt.txt"
+    prompt.write_text("Responda em português.", encoding="utf-8")
+    ledger = tmp_path / "ledger-kitsune"
+
+    result = run_turn("Qwen2.5-0.5B-Instruct", "oi", ledger_dir=ledger, system_prompt_file=prompt,
+                      provider_name="kitsune", base_url=server, max_tokens=1234, retry_delays=(0, 0))
+
+    chat = load_chat(ledger, result["chat_id"])
+    assert chat["messages"][1]["meta"]["max_tokens"] == 1234
+
+
 def test_continuation_sends_the_history(tmp_path, server):
     prompt = tmp_path / "system_prompt.txt"
     prompt.write_text("Responda em português.", encoding="utf-8")

@@ -18,7 +18,7 @@ from . import __version__
 from . import config
 from .chatlog.errors import ChatError
 from .chatlog.ledger import history as ledger_history, latest_chat, load_chat, read_chats, validate_chat_id
-from .chatlog.turn import run_turn
+from .chatlog.turn import DEFAULT_MAX_TOKENS, run_turn
 from .client import (
     clear_tunnel_info,
     probe_shared_tunnel,
@@ -488,6 +488,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 system_prompt_file=system_file,
                 provider_name=PROVIDER,
                 base_url=shared,
+                max_tokens=args.max_tokens,
             )
         else:
             with tunnel(state["NODE"], int(state["PORT"])) as local_port:
@@ -499,6 +500,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
                     system_prompt_file=system_file,
                     provider_name=PROVIDER,
                     base_url=f"http://127.0.0.1:{local_port}/v1",
+                    max_tokens=args.max_tokens,
                 )
     finally:
         if temp_path is not None:
@@ -668,6 +670,8 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--system", default=None, help="instrução de sistema para um chat novo (dispensa o arquivo)")
     chat.add_argument("--system-prompt-file", default="system_prompt.txt", help="arquivo do prompt de sistema (padrão: %(default)s)")
     chat.add_argument("--ledger-dir", default=config.LEDGER_DIR, help="pasta do ledger (padrão: %(default)s)")
+    chat.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
+                      help="teto de tokens gerados por turno, raciocínio incluído (padrão: %(default)s)")
     chat.set_defaults(func=cmd_chat)
 
     tunnel_cmd = sub.add_parser("tunnel", help="abre o túnel até o servidor, para outros programas usarem a API")

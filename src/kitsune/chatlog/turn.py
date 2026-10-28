@@ -20,7 +20,7 @@ from .ledger import (
 )
 from .providers import DEFAULT_PROVIDER, call_model, get_provider
 
-DEFAULT_MAX_TOKENS = 2048
+DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TIMEOUT_S = 180
 RETRY_DELAYS_S = (5, 15, 30)
 
@@ -145,6 +145,7 @@ def run_turn(
                 {
                     "base_url": base,
                     "sent_sha256": sent_sha256,
+                    "max_tokens": max_tokens,
                     "tool": {"name": "kitsune", "version": __version__},
                 }
             )
