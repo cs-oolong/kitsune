@@ -105,3 +105,65 @@ def test_shared_tunnel_base_probes_with_the_current_token(monkeypatch):
     base = cli._shared_tunnel_base({"TOKEN": "token-atual"})
     assert base == "http://127.0.0.1:8000/v1"
     assert seen == {"local_port": 8000, "token": "token-atual"}
+
+
+class _FakePartition:
+    name = "a5000"
+    max_node_gpus = 4
+    max_node_free = 2
+    gpu_type = "RTXA5000"
+
+
+class _FakeInventory:
+    def partition(self, name):
+        return _FakePartition() if name == "a5000" else None
+
+
+def run_start(monkeypatch, argv, *, follow_code=0, tty=True):
+    """Roda cmd_start pelo caminho manual (4 overrides), com tudo que é remoto fingido."""
+    opened = {}
+    monkeypatch.setattr(cli, "list_jobs", lambda: [])
+    monkeypatch.setattr(cli, "fetch_inventory", lambda: _FakeInventory())
+    monkeypatch.setattr(cli, "check_setup", lambda model: None)
+    monkeypatch.setattr(cli, "submit", lambda script: "121999")
+    monkeypatch.setattr(cli, "follow_status", lambda: follow_code)
+    monkeypatch.setattr(cli, "_is_interactive", lambda: tty)
+    def fake_tunnel(args):
+        opened["port"] = args.port
+        return 0
+
+    monkeypatch.setattr(cli, "cmd_tunnel", fake_tunnel)
+    argv = ["start", "--model", "openai/gpt-oss-20b", "--partition", "a5000",
+            "--gpus", "1", "--gpu-util", "0.9", "--max-len", "4096"] + argv
+    code = cli.main(argv)
+    return code, opened.get("port")
+
+
+def test_start_holds_the_tunnel_on_the_default_port_once_ready(monkeypatch):
+    code, port = run_start(monkeypatch, [])
+    assert code == 0
+    assert port == 8000
+
+
+def test_start_no_tunnel_exits_when_ready(monkeypatch):
+    code, port = run_start(monkeypatch, ["--no-tunnel"])
+    assert code == 0
+    assert port is None
+
+
+def test_start_never_holds_a_tunnel_after_a_failure(monkeypatch):
+    code, port = run_start(monkeypatch, [], follow_code=1)
+    assert code == 1
+    assert port is None
+
+
+def test_start_without_a_tty_never_blocks_holding_a_tunnel(monkeypatch):
+    code, port = run_start(monkeypatch, [], tty=False)
+    assert code == 0
+    assert port is None
+
+
+def test_start_no_follow_submits_and_exits(monkeypatch):
+    code, port = run_start(monkeypatch, ["--no-follow"], tty=False)
+    assert code == 0
+    assert port is None

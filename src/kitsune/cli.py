@@ -205,7 +205,21 @@ def cmd_start(args: argparse.Namespace) -> int:
     if args.no_follow:
         print("Acompanhe com: kitsune watch")
         return 0
-    return follow_status()
+    code = follow_status()
+    if _hold_tunnel_after_start(args, code, _is_interactive()):
+        args.port = config.TUNNEL_PORT
+        return cmd_tunnel(args)
+    return code
+
+
+def _is_interactive() -> bool:
+    return sys.stdout.isatty()
+
+
+def _hold_tunnel_after_start(args: argparse.Namespace, follow_code: int, tty: bool) -> bool:
+    """Só segura o túnel se o servidor ficou pronto, o usuário não optou por sair
+    e há um terminal para segurar (em pipe/CI, start nunca bloqueia)."""
+    return follow_code == 0 and not args.no_tunnel and tty
 
 
 @dataclass(frozen=True)
@@ -276,7 +290,7 @@ def follow_status() -> int:
 
     Sem terminal (saída redirecionada), imprime uma vez e sai, como `status`.
     """
-    if not sys.stdout.isatty():
+    if not _is_interactive():
         for line in collect_status().lines:
             print(line)
         return 0
@@ -610,7 +624,10 @@ def build_parser() -> argparse.ArgumentParser:
     suggest_cmd.add_argument("--max-len", type=int, default=None, help="e se o contexto for este? (padrão: o nativo do modelo)")
     suggest_cmd.set_defaults(func=cmd_suggest)
 
-    start = sub.add_parser("start", help="calcula o plano, sobe o modelo num nó de GPU e acompanha até ficar pronto")
+    start = sub.add_parser(
+        "start",
+        help="calcula o plano, sobe o modelo num nó de GPU e, pronto, já segura o túnel aberto",
+    )
     start.add_argument("--model", default=config.DEFAULT_MODEL, help="autor/repo do Hugging Face")
     start.add_argument("--partition", default=None, help="override; sem flag, o solucionador escolhe")
     start.add_argument("--gpus", type=int, default=None, help="override; sem flag, o solucionador escolhe")
@@ -626,6 +643,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-follow",
         action="store_true",
         help="só envia o job e sai (para scripts); acompanhe depois com `kitsune watch`",
+    )
+    start.add_argument(
+        "--no-tunnel",
+        action="store_true",
+        help="sai quando o servidor fica pronto, em vez de segurar o túnel aberto",
     )
     start.set_defaults(func=cmd_start)
 
