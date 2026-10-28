@@ -10,6 +10,7 @@ import signal
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -46,6 +47,7 @@ STATUS_LABEL = {
 PREVIEW_CHARS = 60
 CAUSE_LOG_LINES = 300
 CAUSE_CHARS = 300
+FOLLOW_INTERVAL = 1.0
 END_REASON = {
     "CANCELLED": "foi cancelado",
     "TIMEOUT": "estourou o limite de tempo",
@@ -193,50 +195,105 @@ def cmd_start(args: argparse.Namespace) -> int:
     print(f"Job {job_id} enviado: {model} em {plan_kwargs['partition']}, {plan_kwargs['gpus']} GPU, limite {args.time}.")
     if not fits_now:
         print("Aviso: agora não há GPUs suficientes livres num nó. O job vai esperar na fila.")
-    print("Acompanhe com: kitsune status")
-    return 0
+    if args.no_follow:
+        print("Acompanhe com: kitsune watch")
+        return 0
+    return follow_status()
 
 
-def cmd_status(args: argparse.Namespace) -> int:
+@dataclass(frozen=True)
+class StatusView:
+    """Uma rodada de sonda: as linhas a mostrar e a situação agregada."""
+
+    lines: list[str]
+    situation: str  # "waiting" | "ready" | "failed" | "ended" | "empty"
+
+
+def collect_status() -> StatusView:
     jobs = list_jobs()
     if not jobs:
-        return _status_last_job()
+        return _last_job_view()
+    lines = []
+    situation = "waiting"
     for job in jobs:
         if job.state == "RUNNING":
             state = read_state(job.job_id)
-            label = STATUS_LABEL.get(state.get("STATUS", ""), "iniciando")
-            if state.get("STATUS") == "failed":
+            status = state.get("STATUS", "")
+            label = STATUS_LABEL.get(status, "iniciando")
+            if status == "failed":
                 label += f" — veja com `kitsune logs {job.job_id}`"
+                situation = "failed"
+            elif status == "ready" and situation != "failed":
+                situation = "ready"
             node = state.get("NODE", job.where)
-            print(f"job {job.job_id}: {label} em {node} (rodando há {job.elapsed})")
+            lines.append(f"job {job.job_id}: {label} em {node} (rodando há {job.elapsed})")
         else:
-            print(f"job {job.job_id}: {job.state.lower()} ({job.where}), tempo {job.elapsed}")
-    return 0
+            lines.append(f"job {job.job_id}: {job.state.lower()} ({job.where}), tempo {job.elapsed}")
+    return StatusView(lines, situation)
 
 
-def _status_last_job() -> int:
+def _last_job_view() -> StatusView:
     report = last_job()
     if report is None:
-        print("Nenhum servidor no ar. Use `kitsune start`.")
-        return 0
+        return StatusView(["Nenhum servidor no ar. Use `kitsune start`."], "empty")
     slurm = (report.slurm_state or "").split()[0] if report.slurm_state else ""
     if slurm == "FAILED" or report.state.get("STATUS") == "failed":
         suffix = f" (saída {report.exit_code})" if report.exit_code else ""
-        print(f"Nenhum servidor no ar. O último job ({report.job_id}) falhou{suffix}.")
+        lines = [f"Nenhum servidor no ar. O último job ({report.job_id}) falhou{suffix}."]
         try:
             _, log = read_log(report.job_id, lines=CAUSE_LOG_LINES)
             cause = extract_cause(log)
         except RemoteError:
             cause = None
         if cause:
-            print(f"Causa provável: {cause}")
-        print(f"Veja o log com: kitsune logs {report.job_id}")
-        return 0
+            lines.append(f"Causa provável: {cause}")
+        lines.append(f"Veja o log com: kitsune logs {report.job_id}")
+        return StatusView(lines, "failed")
     reason = END_REASON.get(slurm)
     if reason is None:
         reason = f"encerrou ({slurm.lower()})" if slurm else "encerrou (parado ou tempo esgotado)"
-    print(f"Nenhum servidor no ar. O último job ({report.job_id}) {reason}. Use `kitsune start` para subir outro.")
+    return StatusView(
+        [f"Nenhum servidor no ar. O último job ({report.job_id}) {reason}. Use `kitsune start` para subir outro."],
+        "ended",
+    )
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    for line in collect_status().lines:
+        print(line)
     return 0
+
+
+def follow_status() -> int:
+    """Redesenha o status a cada 1s até o servidor ficar pronto ou morrer.
+
+    Sem terminal (saída redirecionada), imprime uma vez e sai, como `status`.
+    """
+    if not sys.stdout.isatty():
+        for line in collect_status().lines:
+            print(line)
+        return 0
+    sys.stdout.reconfigure(line_buffering=True)
+    try:
+        while True:
+            view = collect_status()
+            print("\033[2J\033[H", end="")
+            for line in view.lines:
+                print(line)
+            print("\n(a cada 1s — Ctrl-C deixa de acompanhar; o job continua no ar)")
+            if view.situation == "ready":
+                print('Servidor pronto. Converse com `kitsune chat "..."` ou abra um `kitsune tunnel`.')
+                return 0
+            if view.situation in ("failed", "ended"):
+                return 1
+            time.sleep(FOLLOW_INTERVAL)
+    except KeyboardInterrupt:
+        print("\nAcompanhamento solto; o job segue no ar. `kitsune watch` reanexa, `kitsune stop` cancela.")
+        return 130
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    return follow_status()
 
 
 def cmd_logs(args: argparse.Namespace) -> int:
@@ -519,7 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
     suggest_cmd.add_argument("--max-len", type=int, default=None, help="e se o contexto for este? (padrão: o nativo do modelo)")
     suggest_cmd.set_defaults(func=cmd_suggest)
 
-    start = sub.add_parser("start", help="calcula o plano e sobe o modelo num nó de GPU")
+    start = sub.add_parser("start", help="calcula o plano, sobe o modelo num nó de GPU e acompanha até ficar pronto")
     start.add_argument("--model", default=config.DEFAULT_MODEL, help="autor/repo do Hugging Face")
     start.add_argument("--partition", default=None, help="override; sem flag, o solucionador escolhe")
     start.add_argument("--gpus", type=int, default=None, help="override; sem flag, o solucionador escolhe")
@@ -531,7 +588,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="deixa o vLLM executar o código Python que vem no repositório do modelo",
     )
+    start.add_argument(
+        "--no-follow",
+        action="store_true",
+        help="só envia o job e sai (para scripts); acompanhe depois com `kitsune watch`",
+    )
     start.set_defaults(func=cmd_start)
+
+    watch_cmd = sub.add_parser("watch", help="acompanha o status a cada segundo até o servidor ficar pronto ou morrer")
+    watch_cmd.set_defaults(func=cmd_watch)
 
     status = sub.add_parser("status", help="mostra se há um servidor no ar; sem job vivo, o que aconteceu com o último")
     status.set_defaults(func=cmd_status)

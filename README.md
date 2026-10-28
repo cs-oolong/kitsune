@@ -34,8 +34,10 @@ kitsune setup                 # uma vez: uv, vLLM e o modelo no headnode
 kitsune models                # modelos baixados no headnode, com tamanho e status
 kitsune cluster               # GPUs livres por partição, nós fora do ar e fila
 kitsune suggest --model Qwen/Qwen2.5-7B-Instruct   # mostra o plano sem enviar
-kitsune start                 # calcula o plano e envia o job ao Slurm (1 hora)
+kitsune start                 # calcula o plano, envia o job (1 hora) e acompanha até ficar pronto
 kitsune start --gpus 2 --max-len 8192              # overrides pontuais
+kitsune start --no-follow      # só envia e sai (para scripts)
+kitsune watch                  # reanexa o acompanhamento a qualquer momento
 kitsune status                # fila, carregando, pronto; sem job no ar, o destino do último job
 kitsune logs                  # últimas 50 linhas do log do job mais recente
 kitsune logs 121897 --lines 0 # log inteiro de um job específico
@@ -51,7 +53,7 @@ kitsune stop                  # cancela antes da 1 hora
 
 O padrão de modelo é `Qwen/Qwen2.5-0.5B-Instruct`, pequeno, para testar o fluxo. Os padrões ficam em `src/kitsune/config.py`.
 
-`kitsune start` calcula o plano sozinho: consulta o Hugging Face (tamanho dos pesos, formato das camadas e contexto nativo do modelo) e o estado atual do cluster, e deriva partição, número de GPUs, gpu-util e comprimento de contexto. O contexto alvo é o nativo do modelo (`max_position_embeddings`), limitado ao que couber no teto de gpu-util (0.9); se não couber, o plano avisa até onde dá. O gpu-util é o mínimo que comporta pesos + KV cache + overhead — nada de tunar na mão. `--partition`, `--gpus`, `--gpu-util` e `--max-len` existem como overrides; passando os quatro, `start` nem consulta o Hugging Face (útil sem rede). `--time` (padrão 1 hora) e `--trust-remote-code` continuam decisões suas.
+`kitsune start` calcula o plano sozinho: consulta o Hugging Face (tamanho dos pesos, formato das camadas e contexto nativo do modelo) e o estado atual do cluster, e deriva partição, número de GPUs, gpu-util e comprimento de contexto. Depois de enviar o job, ele já acompanha o status redesenhando a tela a cada segundo (como um `watch`): sai com código 0 quando o servidor fica pronto, com código 1 se o job morre (mostrando a causa provável), e Ctrl-C só solta o acompanhamento — o job continua no ar. Sem terminal (saída redirecionada), imprime o status uma vez e sai; `--no-follow` pula o acompanhamento de propósito. `kitsune watch` reanexa o acompanhamento a qualquer momento. O contexto alvo é o nativo do modelo (`max_position_embeddings`), limitado ao que couber no teto de gpu-util (0.9); se não couber, o plano avisa até onde dá. O gpu-util é o mínimo que comporta pesos + KV cache + overhead — nada de tunar na mão. `--partition`, `--gpus`, `--gpu-util` e `--max-len` existem como overrides; passando os quatro, `start` nem consulta o Hugging Face (útil sem rede). `--time` (padrão 1 hora) e `--trust-remote-code` continuam decisões suas.
 
 `kitsune suggest` mostra o mesmo plano sem enviar nada: o recomendado, as alternativas e por que cada partição foi descartada. Com flags (`--partition`, `--gpus`, `--gpu-util`, `--max-len`) vira modo "e se?". O solucionador descarta partições que o vLLM não suporta (compute capability abaixo de 7.5, como a P5000) e usa `--dtype half` em GPUs abaixo de 8.0, como as Turing, porque o vLLM não roda bf16 nelas. O desenho está em `DESIGN.md`.
 
