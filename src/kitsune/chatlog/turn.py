@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .. import __version__
 from .errors import ChatError
@@ -47,15 +49,15 @@ def run_turn(
     model_id: str,
     message: str,
     *,
-    chat_id: Optional[Any] = None,
-    ledger_dir: Path = Path("ledger"),
+    chat_id: str | None = None,
+    ledger_dir: Path,
     system_prompt_file: Path = Path("system_prompt.txt"),
     provider_name: str = DEFAULT_PROVIDER,
-    base_url: Optional[str] = None,
+    base_url: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     timeout: int = DEFAULT_TIMEOUT_S,
     retry_delays: tuple = RETRY_DELAYS_S,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Append one user turn, ask the model, append the reply, save.
 
     A new chat snapshots the system prompt file (and its sha256) into the
@@ -75,10 +77,9 @@ def run_turn(
     base = (base_url or provider.base_url).rstrip("/")
 
     ensure_ledger_dir(ledger_dir)
-    if chat_id is None or chat_id == "":
+    if not chat_id:
         chat_id = new_chat_id()
     else:
-        chat_id = str(chat_id)
         validate_chat_id(chat_id)
 
     with chat_lock(ledger_dir, chat_id):
@@ -112,7 +113,7 @@ def run_turn(
             {"role": "user", "content": message, "created_at": utc_now()}
         )
 
-        prompt: List[Dict[str, str]] = [
+        prompt: list[dict[str, str]] = [
             {"role": "system", "content": system_prompt}
         ]
         prompt.extend(history(chat, include_errors=False))
@@ -159,10 +160,4 @@ def run_turn(
         chat["updated_at"] = utc_now()
         save_chat(ledger_dir, chat)
 
-    return {
-        "chat_id": chat_id,
-        "provider": provider.name,
-        "model_id": model_id,
-        "system_prompt": system_prompt,
-        "history": history(chat),
-    }
+    return {"chat_id": chat_id, "history": history(chat)}

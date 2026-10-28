@@ -1,10 +1,13 @@
+from __future__ import annotations
+
 import json
 import os
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any
 
 from .. import __version__
 from .errors import ChatError
@@ -22,7 +25,7 @@ class Provider:
     api_key_env: str
 
 
-PROVIDERS: Dict[str, Provider] = {
+PROVIDERS: dict[str, Provider] = {
     "kitsune": Provider(
         name="kitsune",
         base_url="http://127.0.0.1:8000/v1",
@@ -42,8 +45,8 @@ def get_provider(name: str) -> Provider:
     return PROVIDERS[name]
 
 
-def _parse_response(data: Dict[str, Any]) -> Dict[str, Any]:
-    meta: Dict[str, Any] = {}
+def _parse_response(data: dict[str, Any]) -> dict[str, Any]:
+    meta: dict[str, Any] = {}
     for key in ("id", "model", "provider", "created", "usage"):
         if data.get(key) is not None:
             meta[key] = data[key]
@@ -60,14 +63,14 @@ def _parse_response(data: Dict[str, Any]) -> Dict[str, Any]:
 def call_model(
     provider: Provider,
     model_id: str,
-    messages: List[Dict[str, str]],
+    messages: list[dict[str, str]],
     *,
     base_url: str,
     max_tokens: int,
     timeout: int,
     retry_delays: tuple,
     sleep: Callable[[float], None] = time.sleep,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Returns ``{"content": str, "meta": dict}`` or ``{"content": None, "error": str}``."""
     api_key = os.environ.get(provider.api_key_env)
     if not api_key:

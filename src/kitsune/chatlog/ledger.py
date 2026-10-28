@@ -1,12 +1,15 @@
+from __future__ import annotations
+
 import fcntl
 import json
 import os
 import re
 import secrets
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any
 
 from .errors import ChatError
 
@@ -44,7 +47,7 @@ def chat_path(ledger_dir: Path, chat_id: str) -> Path:
     return ledger_dir / (chat_id + ".json")
 
 
-def load_chat(ledger_dir: Path, chat_id: str) -> Optional[Dict[str, Any]]:
+def load_chat(ledger_dir: Path, chat_id: str) -> dict[str, Any] | None:
     path = chat_path(ledger_dir, chat_id)
     if not path.exists():
         return None
@@ -57,7 +60,7 @@ def load_chat(ledger_dir: Path, chat_id: str) -> Optional[Dict[str, Any]]:
         )
 
 
-def save_chat(ledger_dir: Path, chat: Dict[str, Any]) -> None:
+def save_chat(ledger_dir: Path, chat: dict[str, Any]) -> None:
     path = chat_path(ledger_dir, chat["chat_id"])
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(
@@ -65,6 +68,31 @@ def save_chat(ledger_dir: Path, chat: Dict[str, Any]) -> None:
         encoding="utf-8",
     )
     os.replace(tmp, path)
+
+
+def read_chats(ledger_dir: Path) -> list[dict[str, Any]]:
+    """All readable chats in the ledger, newest first. Broken files are skipped."""
+    if not ledger_dir.is_dir():
+        return []
+    chats = []
+    for path in ledger_dir.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and "chat_id" in data:
+            chats.append(data)
+    return sorted(chats, key=lambda chat: chat.get("updated_at", ""), reverse=True)
+
+
+def latest_chat(ledger_dir: Path, *, provider: str, model_id: str | None = None) -> str | None:
+    for chat in read_chats(ledger_dir):
+        if chat.get("provider") != provider:
+            continue
+        if model_id is not None and chat.get("model_id") != model_id:
+            continue
+        return chat["chat_id"]
+    return None
 
 
 @contextmanager
@@ -77,10 +105,10 @@ def chat_lock(ledger_dir: Path, chat_id: str) -> Iterator[None]:
 
 
 def history(
-    chat: Dict[str, Any], include_errors: bool = True
-) -> List[Dict[str, Any]]:
+    chat: dict[str, Any], include_errors: bool = True
+) -> list[dict[str, Any]]:
     """History for the model (errors skipped) or the CLI response (errors shown)."""
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for msg in chat.get("messages", []):
         if msg.get("role") == "user":
             out.append({"role": "user", "content": msg.get("content") or ""})

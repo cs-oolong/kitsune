@@ -14,14 +14,13 @@ from typing import Sequence
 
 from . import __version__
 from . import config
-from .client import ChatError, chat_completion, save_api_key, tunnel
+from .chatlog.errors import ChatError
+from .chatlog.ledger import history as ledger_history, latest_chat, load_chat, read_chats, validate_chat_id
+from .chatlog.turn import run_turn
+from .client import save_api_key, tunnel
 from .cluster import Inventory, fetch_inventory
-from .ledger import latest_chat, read_chats
 from .estimate import OVERHEAD_GIB, dtype_for, fetch_model_info, kv_gib, suggest, weight_gib
 from .job import render_job_script
-from .chatlog.errors import ChatError as LedgerChatError
-from .chatlog.ledger import history as ledger_history, load_chat, validate_chat_id
-from .chatlog.turn import run_turn
 from .remote import (
     RemoteError,
     cancel,
@@ -220,12 +219,24 @@ def check_chat_target(ledger_dir: Path, chat_id: str | None, system: str | None)
         return
     validate_chat_id(chat_id)
     if system is not None:
-        raise LedgerChatError("--system só vale para chat novo; não use junto com -c", code="bad_request")
+        raise ChatError("--system só vale para chat novo; não use junto com -c", code="bad_request")
     if load_chat(ledger_dir, chat_id) is None:
-        raise LedgerChatError(
+        raise ChatError(
             f"chat {chat_id} não existe em {ledger_dir}. Sem -c, o comando cria um chat novo.",
             code="chat_not_found",
         )
+
+
+def _ready_server() -> tuple[str, dict[str, str]]:
+    running = [job for job in list_jobs() if job.state == "RUNNING"]
+    if not running:
+        raise RemoteError("nenhum servidor no ar. Use `kitsune start` e acompanhe com `kitsune status`.")
+    job_id = running[0].job_id
+    state = read_state(job_id)
+    if state.get("STATUS") != "ready":
+        label = STATUS_LABEL.get(state.get("STATUS", ""), "iniciando")
+        raise RemoteError(f"o servidor ainda não está pronto ({label}). Veja `kitsune status`.")
+    return job_id, state
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
@@ -235,13 +246,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
     ledger_dir = Path(args.ledger_dir)
     check_chat_target(ledger_dir, args.chat, args.system)
 
-    running = [job for job in list_jobs() if job.state == "RUNNING"]
-    if not running:
-        raise RemoteError("nenhum servidor no ar. Use `kitsune start` e acompanhe com `kitsune status`.")
-    state = read_state(running[0].job_id)
-    if state.get("STATUS") != "ready":
-        label = STATUS_LABEL.get(state.get("STATUS", ""), "iniciando")
-        raise RemoteError(f"o servidor ainda não está pronto ({label}). Veja `kitsune status`.")
+    _, state = _ready_server()
 
     system_file = Path(args.system_prompt_file)
     temp_path = None
@@ -262,9 +267,6 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 provider_name=PROVIDER,
                 base_url=f"http://127.0.0.1:{local_port}/v1",
             )
-    except LedgerChatError as error:
-        print(json.dumps({"error": getattr(error, "code", "error"), "detail": str(error)}, ensure_ascii=False), file=sys.stderr)
-        return 2
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
@@ -288,22 +290,20 @@ def cmd_tunnel(args: argparse.Namespace) -> int:
     # Processos de fundo de shells não interativos herdam SIGINT ignorado; SIGTERM também fecha o túnel.
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, _raise_interrupt)
-    running = [job for job in list_jobs() if job.state == "RUNNING"]
-    if not running:
-        raise RemoteError("nenhum servidor no ar. Use `kitsune start` e acompanhe com `kitsune status`.")
-    state = read_state(running[0].job_id)
-    if state.get("STATUS") != "ready":
-        label = STATUS_LABEL.get(state.get("STATUS", ""), "iniciando")
-        raise RemoteError(f"o servidor ainda não está pronto ({label}). Veja `kitsune status`.")
+    job_id, state = _ready_server()
 
     save_api_key(state["TOKEN"], config.API_KEY_FILE)
     with tunnel(state["NODE"], int(state["PORT"]), local_port=args.port) as local_port:
-        print(f"Túnel aberto: http://127.0.0.1:{local_port}/v1 -> {state['NODE']}:{state['PORT']} (job {running[0].job_id})")
+        print(f"Túnel aberto: http://127.0.0.1:{local_port}/v1 -> {state['NODE']}:{state['PORT']} (job {job_id})")
         print(f"Modelo: {state['MODEL']}")
         print(f"Chave: {config.API_KEY_FILE} (permissão 600)")
         print("\nEm outro terminal:")
         print(f'  export KITSUNE_API_KEY="$(cat {config.API_KEY_FILE})"')
-        print(f"  interact --provider kitsune --model {state['MODEL']} --msg \"...\"")
+        body = json.dumps({"model": state["MODEL"], "messages": [{"role": "user", "content": "oi"}]}, ensure_ascii=False)
+        print(
+            f"  curl http://127.0.0.1:{local_port}/v1/chat/completions "
+            f'-H "Authorization: Bearer $KITSUNE_API_KEY" -H "Content-Type: application/json" -d \'{body}\''
+        )
         print("\nCtrl-C fecha o túnel.")
         try:
             while True:
@@ -362,7 +362,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kitsune",
-        description="Mini-OpenRouter: sobe um modelo num nó de GPU do cluster por tempo limitado e conversa com ele.",
+        description="Sobe um modelo num nó de GPU do cluster por tempo limitado e conversa com ele.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -405,7 +405,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--ledger-dir", default=config.LEDGER_DIR, help="pasta do ledger (padrão: %(default)s)")
     chat.set_defaults(func=cmd_chat)
 
-    tunnel_cmd = sub.add_parser("tunnel", help="abre o túnel até o servidor, para outras ferramentas (ex.: interact)")
+    tunnel_cmd = sub.add_parser("tunnel", help="abre o túnel até o servidor, para outros programas usarem a API")
     tunnel_cmd.add_argument("--port", type=int, default=config.TUNNEL_PORT, help="porta local (padrão: %(default)s)")
     tunnel_cmd.set_defaults(func=cmd_tunnel)
 
@@ -429,10 +429,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except LedgerChatError as error:
-        print(json.dumps({"error": getattr(error, "code", "error"), "detail": str(error)}, ensure_ascii=False), file=sys.stderr)
+    except ChatError as error:
+        print(json.dumps({"error": error.code, "detail": str(error)}, ensure_ascii=False), file=sys.stderr)
         return 2
-    except (RemoteError, ChatError, ValueError) as error:
+    except (RemoteError, ValueError) as error:
         print(f"erro: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

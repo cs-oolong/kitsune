@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "kitsune"
 dynamic = ["version"]
-description = "Mini-OpenRouter: sobe um modelo num nó de GPU do cluster RECOD por tempo limitado e conversa com ele."
+description = "Sobe um modelo num nó de GPU do cluster RECOD por tempo limitado e conversa com ele, pela API no formato da OpenAI."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []
