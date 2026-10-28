@@ -4,7 +4,13 @@ from kitsune.job import render_job_script
 from kitsune.remote import validate_model
 
 
-def render(model: str = "Qwen/Qwen2.5-0.5B-Instruct", *, gpus: int = 1, dtype: str = "auto") -> str:
+def render(
+    model: str = "Qwen/Qwen2.5-0.5B-Instruct",
+    *,
+    gpus: int = 1,
+    dtype: str = "auto",
+    trust_remote_code: bool = False,
+) -> str:
     return render_job_script(
         model,
         partition="l40s",
@@ -15,6 +21,7 @@ def render(model: str = "Qwen/Qwen2.5-0.5B-Instruct", *, gpus: int = 1, dtype: s
         dtype=dtype,
         gpu_util=0.3,
         max_len=4096,
+        trust_remote_code=trust_remote_code,
     )
 
 
@@ -43,6 +50,17 @@ def test_dtype_and_memory_settings_reach_vllm():
     assert "--dtype half" in script
     assert "--gpu-memory-utilization 0.3" in script
     assert "--max-model-len 4096" in script
+
+
+def test_trust_remote_code_is_passed_only_when_asked():
+    assert "--trust-remote-code" not in render()
+    assert "--gpu-memory-utilization 0.3 &" in render()
+    script = render(trust_remote_code=True)
+    assert "--gpu-memory-utilization 0.3 --trust-remote-code &" in script
+
+
+def test_model_is_loaded_offline_from_the_local_folder():
+    assert "export HF_HUB_OFFLINE=1" in render()
 
 
 def test_token_is_generated_on_the_node_not_embedded():

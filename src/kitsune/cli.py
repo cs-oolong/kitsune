@@ -102,6 +102,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         dtype=dtype,
         gpu_util=args.gpu_util,
         max_len=args.max_len,
+        trust_remote_code=args.trust_remote_code,
     )
     job_id = submit(script)
     print(f"Job {job_id} enviado: {model} em {args.partition}, {args.gpus} GPU, limite {args.time}.")
@@ -392,6 +393,11 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--time", default=config.DEFAULT_TIME, help="limite do job, HH:MM:SS")
     start.add_argument("--gpu-util", type=float, default=config.GPU_MEMORY_UTILIZATION)
     start.add_argument("--max-len", type=int, default=config.MAX_MODEL_LEN)
+    start.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="deixa o vLLM executar o código Python que vem no repositório do modelo",
+    )
     start.set_defaults(func=cmd_start)
 
     status = sub.add_parser("status", help="mostra se há um servidor no ar")

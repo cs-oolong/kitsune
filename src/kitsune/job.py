@@ -24,6 +24,7 @@ _TEMPLATE = """#!/bin/bash
 set -euo pipefail
 ROOT="$HOME/{root}"
 VENV="$ROOT/venv"
+export HF_HUB_OFFLINE=1
 MODEL_DIR="$ROOT/models/{name}"
 STATE="$ROOT/state/$SLURM_JOB_ID.env"
 umask 077
@@ -42,7 +43,7 @@ write_state loading
 export VLLM_API_KEY="$TOKEN"
 "$VENV/bin/vllm" serve "$MODEL_DIR" --served-model-name {name_quoted} --host 0.0.0.0 --port "$PORT" \\
     --tensor-parallel-size {gpus} --dtype {dtype} --max-model-len {max_len} \\
-    --gpu-memory-utilization {gpu_util} &
+    --gpu-memory-utilization {gpu_util}{trust_flag} &
 SERVER=$!
 
 until "$VENV/bin/python" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$PORT/health', timeout=2)" 2>/dev/null; do
@@ -70,8 +71,10 @@ def render_job_script(
     dtype: str,
     gpu_util: float,
     max_len: int,
+    trust_remote_code: bool = False,
 ) -> str:
     name = model_dir_name(model)
+    trust_flag = " --trust-remote-code" if trust_remote_code else ""
     return _TEMPLATE.format(
         partition=partition,
         gpus=gpus,
@@ -84,4 +87,5 @@ def render_job_script(
         dtype=dtype,
         max_len=max_len,
         gpu_util=gpu_util,
+        trust_flag=trust_flag,
     )
