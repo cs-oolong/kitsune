@@ -19,7 +19,10 @@ from .cluster import Partition
 from .config import GPU_SPECS, GPU_UTIL_CEILING, MIN_COMPUTE_CAPABILITY, MIN_CONTEXT
 
 GIB = 1024**3
-OVERHEAD_GIB = 2.0
+# Memória que o vLLM gasta além dos pesos (ativações do profiling, CUDA graphs, buffers).
+# Medido no cluster com o vLLM 0.11: ~7.7 GiB para o gpt-oss-20b (2026-10-28); era 2 GiB
+# na era do vLLM 0.8.5, que compilava bem menos.
+OVERHEAD_GIB = 8.0
 TP_CHOICES = (1, 2, 4, 8)
 BF16_MIN_COMPUTE_CAPABILITY = 8.0
 BYTES_PER_PARAM = {
@@ -79,8 +82,13 @@ class Rejection:
 def parse_model_info(repo: str, api: dict, config: dict) -> ModelInfo:
     safetensors = api.get("safetensors") or {}
     parameters = safetensors.get("parameters") or {}
+    bytes_per_param = BYTES_PER_PARAM
+    # MXFP4 (gpt-oss): a API conta os parâmetros lógicos como U8, mas nos safetensors
+    # eles vêm empacotados 2 por byte — 0.5 byte por parâmetro, não 1.
+    if (config.get("quantization_config") or {}).get("quant_method") == "mxfp4":
+        bytes_per_param = {**BYTES_PER_PARAM, "U8": 0.5}
     if parameters:
-        weight_bytes = sum(int(count) * BYTES_PER_PARAM.get(dtype, 2) for dtype, count in parameters.items())
+        weight_bytes = sum(int(count) * bytes_per_param.get(dtype, 2) for dtype, count in parameters.items())
     else:
         weight_bytes = int(safetensors.get("total", 0)) * 2
     if weight_bytes == 0:

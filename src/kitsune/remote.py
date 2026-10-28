@@ -6,7 +6,15 @@ import re
 import subprocess
 from dataclasses import dataclass
 
-from .config import HOST, PYTHON_VERSION, REMOTE_ROOT, TORCH_VERSION, TRANSFORMERS_VERSION, VLLM_VERSION
+from .config import (
+    HOST,
+    MAX_CUDA_VERSION,
+    PYTHON_VERSION,
+    REMOTE_ROOT,
+    TORCH_VERSION,
+    TRANSFORMERS_VERSION,
+    VLLM_VERSION,
+)
 
 JOB_NAME = "kitsune"
 SQUEUE_FORMAT = "%i|%T|%R|%M"
@@ -148,14 +156,26 @@ if ! command -v uv >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/uv" ]; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
 fi
 UV=$(command -v uv 2>/dev/null || echo "$HOME/.local/bin/uv")
+# Em home NFS, rm -rf falha em arquivos .nfs* de processos que ainda seguram o venv;
+# renomear funciona sempre e o backup sai depois, quando os donos fecharem os arquivos.
 if [ -x "$ROOT/venv/bin/python" ] && ! "$ROOT/venv/bin/python" -c "import vllm; assert vllm.__version__ == '{VLLM_VERSION}'" >/dev/null 2>&1; then
-    rm -rf "$ROOT/venv"
+    mv "$ROOT/venv" "$ROOT/venv.bak.$(date +%s)"
 fi
 if [ ! -x "$ROOT/venv/bin/python" ]; then
     "$UV" venv --python {PYTHON_VERSION} "$ROOT/venv"
 fi
 "$UV" pip install --python "$ROOT/venv/bin/python" vllm=={VLLM_VERSION} transformers=={TRANSFORMERS_VERSION} huggingface_hub
-"$ROOT/venv/bin/python" -c "import torch; assert torch.__version__.startswith('{TORCH_VERSION}') and torch.version.cuda.startswith('12.4'), (torch.__version__, torch.version.cuda)"
+"$ROOT/venv/bin/python" -c "import torch; assert torch.__version__.startswith('{TORCH_VERSION}') and float(torch.version.cuda) <= {MAX_CUDA_VERSION}, (torch.__version__, torch.version.cuda)"
+# gpt-oss: o tokenizer Harmony baixa um vocab de openaipublic na 1ª vez e os nós de
+# computação podem não ter rota. Pré-baixa no headnode, num cache que o job exporta.
+export TIKTOKEN_RS_CACHE_DIR="$ROOT/tiktoken-cache"
+mkdir -p "$TIKTOKEN_RS_CACHE_DIR"
+if ! "$ROOT/venv/bin/python" -c "from openai_harmony import load_harmony_encoding; load_harmony_encoding('HarmonyGptOss')" 2>/dev/null; then
+    case "$MODEL" in
+        *gpt-oss*) echo "erro: não consegui baixar o vocab Harmony (openaipublic); sem ele o modelo não sobe" >&2; exit 1;;
+        *) echo "aviso: pré-download do vocab Harmony falhou; só afeta modelos gpt-oss" >&2;;
+    esac
+fi
 "$ROOT/venv/bin/python" -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='$MODEL', local_dir='$MODEL_DIR')"
 echo "$MODEL" > "$MODEL_DIR/{REPO_MARKER}"
 echo "Modelo pronto em $MODEL_DIR"

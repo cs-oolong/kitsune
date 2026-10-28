@@ -50,6 +50,10 @@ ctx_fit(tp) = ( tp × (mem_gib × TETO − OVERHEAD_GIB) × GiB − pesos_bytes 
 ctx_escolhido = min(native_max_len, ctx_fit)
 ```
 
+Nota: o overhead por GPU (ativações do profiling, CUDA graphs, buffers do vLLM)
+é uma constante em `estimate.py` (`OVERHEAD_GIB = 8.0`), medida no cluster com o
+vLLM 0.11 — na era do 0.8.5, 2 GiB bastavam.
+
 - Se `ctx_escolhido == native`: plano serve o contexto inteiro do modelo.
 - Se não: o plano é aceito com **aviso explícito** ("contexto limitado a X;
   o nativo Y não cabe no teto de gpu-util Z; use --gpu-util ou mais GPUs").
@@ -62,7 +66,7 @@ Inverte a direção do cálculo: em vez de escolher util e testar o encaixe,
 calcula o encaixe e deriva o util mínimo:
 
 ```
-precisa_gib(tp, ctx) = (pesos + kv × ctx) / tp / GiB + OVERHEAD_GIB
+precisa_gib(tp, ctx) = (pesos + kv × ctx) / tp / GiB + OVERHEAD_GIB  # 8 GiB medidos
 util(tp, ctx)        = precisa_gib / mem_gib        # arredondado para cima, 2 casas
 ```
 

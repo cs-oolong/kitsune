@@ -25,6 +25,8 @@ set -euo pipefail
 ROOT="$HOME/{root}"
 VENV="$ROOT/venv"
 export HF_HUB_OFFLINE=1
+# gpt-oss: o tokenizer Harmony busca um vocab remoto; usa o cache pré-baixado no setup.
+export TIKTOKEN_RS_CACHE_DIR="$ROOT/tiktoken-cache"
 MODEL_DIR="$ROOT/models/{name}"
 STATE="$ROOT/state/$SLURM_JOB_ID.env"
 umask 077

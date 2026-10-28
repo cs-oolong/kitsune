@@ -14,12 +14,15 @@ DEFAULT_MEM = "16G"
 DEFAULT_TIME = "01:00:00"
 
 PYTHON_VERSION = "3.12"
-# vLLM 0.8.5 pede torch 2.6.0 do PyPI, que traz CUDA 12.4: roda no driver 570 do cluster (CUDA 12.8).
-# Versões mais novas (0.26+, torch 2.11) usam CUDA 12.9/13 e falharam com "driver too old".
-VLLM_VERSION = "0.8.5"
-TORCH_VERSION = "2.6.0"
-# transformers 5.x removou atributos que o vLLM 0.8.5 usa (all_special_tokens_extended).
-TRANSFORMERS_VERSION = "4.51.3"
+# vLLM 0.11.0 pede torch 2.8.0 do PyPI, cujo wheel é cu128: roda no driver 570 do cluster (CUDA 12.8).
+# gpt-oss entrou no vLLM 0.10; a 0.11.0 é a mais nova cujo torch ainda cabe nesse teto —
+# as seguintes (0.26+, torch 2.11) usam CUDA 12.9/13 e falham com "driver too old".
+VLLM_VERSION = "0.11.0"
+TORCH_VERSION = "2.8.0"
+# gpt-oss exige transformers >= 4.55; o vLLM 0.11.0 exige >= 4.55.2.
+TRANSFORMERS_VERSION = "4.55.2"
+# Teto de CUDA do driver 570: o setup falha cedo se o wheel do torch vier com CUDA maior.
+MAX_CUDA_VERSION = 12.8
 
 # Dimensionamento automático (ver DESIGN.md). O solucionador deriva o gpu-util do
 # que o modelo precisa, limitado por este teto; 0.9 é o próprio padrão do vLLM e

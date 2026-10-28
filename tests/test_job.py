@@ -63,6 +63,11 @@ def test_model_is_loaded_offline_from_the_local_folder():
     assert "export HF_HUB_OFFLINE=1" in render()
 
 
+def test_harmony_vocab_cache_is_pointed_at_the_prefetched_dir():
+    # gpt-oss: sem isso o tokenizer tenta baixar o vocab do nó de computação
+    assert 'export TIKTOKEN_RS_CACHE_DIR="$ROOT/tiktoken-cache"' in render()
+
+
 def test_token_is_generated_on_the_node_not_embedded():
     script = render()
     assert "secrets.token_hex(24)" in script

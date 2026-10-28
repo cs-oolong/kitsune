@@ -52,8 +52,10 @@ def test_setup_script_downloads_into_the_models_folder():
     script = setup_script("Qwen/Qwen2.5-0.5B-Instruct")
     assert "snapshot_download(repo_id='$MODEL'" in script
     assert "$ROOT/models/Qwen2.5-0.5B-Instruct" in script
-    assert "vllm==0.8.5" in script
-    assert "transformers==4.51.3" in script
-    assert "torch.__version__.startswith('2.6.0')" in script
-    assert "torch.version.cuda.startswith('12.4')" in script
-    assert "rm -rf \"$ROOT/venv\"" in script
+    assert "vllm==0.11.0" in script
+    assert "transformers==4.55.2" in script
+    assert "torch.__version__.startswith('2.8.0')" in script
+    assert "float(torch.version.cuda) <= 12.8" in script
+    assert 'export TIKTOKEN_RS_CACHE_DIR="$ROOT/tiktoken-cache"' in script
+    assert "load_harmony_encoding('HarmonyGptOss')" in script
+    assert "mv \"$ROOT/venv\" \"$ROOT/venv.bak.$(date +%s)\"" in script

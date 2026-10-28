@@ -20,6 +20,20 @@ QWEN_05B_CONFIG = {
 }
 TINY = parse_model_info("Qwen/Qwen2.5-0.5B-Instruct", QWEN_05B_API, QWEN_05B_CONFIG)
 
+# Números reais da API do Hugging Face para openai/gpt-oss-20b (2026-10-27).
+GPT_OSS_API = {
+    "safetensors": {"parameters": {"BF16": 1804459584, "U8": 19110297600}, "total": 20914757184}
+}
+GPT_OSS_CONFIG = {
+    "num_hidden_layers": 24,
+    "num_attention_heads": 64,
+    "num_key_value_heads": 8,
+    "head_dim": 64,
+    "hidden_size": 2880,
+    "max_position_embeddings": 131072,
+    "quantization_config": {"quant_method": "mxfp4"},
+}
+
 
 def part(name, gpu_type, *, max_node_gpus=1, max_node_free=1, free=1, total=1, pending=0, down=0):
     return Partition(
@@ -90,8 +104,8 @@ def test_auto_plan_serves_native_context_with_derived_util():
     assert plan.gpus == 1
     assert plan.max_len == 32768
     assert plan.full_context
-    # pesos ~0.92 + KV 0.375 + overhead 2 = ~3.3 GiB; 3.3/45 = 0.0733 -> 0.08
-    assert plan.gpu_util == 0.08
+    # pesos ~0.92 + KV 0.375 + overhead 8 = ~9.3 GiB; 9.3/45 = 0.2066 -> 0.21
+    assert plan.gpu_util == 0.21
 
 
 def test_auto_plan_falls_back_to_min_context_without_native():
@@ -113,19 +127,19 @@ def test_explicit_max_len_becomes_the_target():
 
 def test_explicit_gpu_util_caps_what_fits():
     model = big(30, layers=40, heads=32, kv_heads=8, head_dim=128)
-    # precisa (30+10)/tp + 2 por GPU: com teto 0.3 só cabe com 4 GPUs (0.27)
-    plans, rejected = solve(model, [part("l40s", "L40S", max_node_gpus=4, max_node_free=4)], gpu_util=0.3)
+    # precisa (30+5)/tp + 8 por GPU: com teto 0.45 só cabe com 4 GPUs (16.75/45 -> 0.38)
+    plans, rejected = solve(model, [part("l40s", "L40S", max_node_gpus=4, max_node_free=4)], gpu_util=0.45)
     assert plans[0].gpus == 4
-    assert plans[0].gpu_util == 0.3  # override é usado na linha de comando, não o derivado
+    assert plans[0].gpu_util == 0.45  # override é usado na linha de comando, não o derivado
 
 
-def test_auto_ceiling_fits_model_on_one_gpu_with_high_util():
+def test_auto_ceiling_spreads_model_with_fewer_gpus_than_old_default():
     model = big(30, layers=40, heads=32, kv_heads=8, head_dim=128)
-    # (30+5)/1 + 2 = 37 GiB numa L40S: cabe com 1 GPU (util derivado 0.83);
-    # o teto antigo de 0.3 pediria 4 GPUs para o mesmo modelo
+    # (30+5)/2 + 8 = 25.5 GiB numa L40S: cabe com 2 GPUs (util derivado 0.57);
+    # o teto antigo de 0.3 não deixaria caber nem com 4
     plans, rejected = solve(model, [part("l40s", "L40S", max_node_gpus=4, max_node_free=4)])
-    assert plans[0].gpus == 1
-    assert plans[0].gpu_util == 0.83
+    assert plans[0].gpus == 2
+    assert plans[0].gpu_util == 0.57
 
 
 def test_context_is_clamped_with_a_clear_flag_when_native_does_not_fit():
@@ -192,6 +206,24 @@ def test_too_big_reports_why_it_does_not_fit():
     plans, rejected = solve(model, [part("rtx8000", "RTX8000", max_node_gpus=8, max_node_free=8, free=8, total=8)])
     assert plans == []
     assert "nem o mínimo" in rejected[0].reason
+
+
+def test_mxfp4_weights_are_packed_two_params_per_byte():
+    info = parse_model_info("openai/gpt-oss-20b", GPT_OSS_API, GPT_OSS_CONFIG)
+    assert info.weight_bytes == 1804459584 * 2 + 19110297600 // 2  # ~12.3 GiB, não ~21
+    assert info.native_max_len == 131072
+    assert info.heads == 64  # TP 1/2/4/8 todos válidos
+
+
+def test_gpt_oss_fits_one_l40s_with_native_context():
+    info = parse_model_info("openai/gpt-oss-20b", GPT_OSS_API, GPT_OSS_CONFIG)
+    plans, rejected = solve(info, [part("l40s", "L40S", max_node_gpus=4, max_node_free=4)])
+    plan = plans[0]
+    assert plan.gpus == 1
+    assert plan.max_len == 131072
+    assert plan.full_context
+    # pesos ~12.3 + KV 6.0 + overhead 8 = ~26.3 GiB; 26.3/45 = 0.5835 -> 0.59
+    assert plan.gpu_util == 0.59
 
 
 def test_dtype_for_compute_capability():
